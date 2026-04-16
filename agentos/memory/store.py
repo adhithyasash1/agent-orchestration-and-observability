@@ -17,6 +17,16 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+from .salience import (
+    KIND_BONUS,
+    KIND_BONUS_DEFAULT,
+    PROMOTED_FACT_SALIENCE_FLOOR,
+    UTILITY_LEXICAL_WEIGHT,
+    UTILITY_RECENCY_WEIGHT,
+    UTILITY_SALIENCE_WEIGHT,
+    UTILITY_VERIFIER_WEIGHT,
+)
+
 
 MEMORY_KINDS = ("working", "episodic", "semantic")
 DEFAULT_TTLS = {
@@ -235,7 +245,7 @@ class MemoryStore:
         episodic_id = self.add(
             f"Episode\nUser: {user_input}\nVerified answer: {answer}",
             kind="episodic",
-            salience=max(0.65, salience),
+            salience=max(PROMOTED_FACT_SALIENCE_FLOOR - 0.05, salience),
             ttl_seconds=episodic_ttl_seconds,
             source_run_id=run_id,
             tool_used=tool_used,
@@ -245,7 +255,7 @@ class MemoryStore:
         semantic_id = self.add(
             answer[:1200],
             kind="semantic",
-            salience=max(0.8, salience),
+            salience=max(PROMOTED_FACT_SALIENCE_FLOOR + 0.1, salience),
             ttl_seconds=semantic_ttl_seconds,
             source_run_id=run_id,
             tool_used=tool_used,
@@ -425,7 +435,7 @@ def _build_match_query(query: str) -> str:
 
 
 def _expected_utility(row: dict, query: str, now: float) -> float:
-    kind_bonus = {"working": 0.16, "episodic": 0.26, "semantic": 0.36}.get(row.get("kind"), 0.1)
+    kind_bonus = KIND_BONUS.get(row.get("kind"), KIND_BONUS_DEFAULT)
     salience = float(row.get("salience") or 0.0)
     created_at = float(row.get("created_at") or now)
     age_hours = max(0.0, (now - created_at) / 3600)
@@ -441,4 +451,11 @@ def _expected_utility(row: dict, query: str, now: float) -> float:
         if query_tokens:
             lexical = len(query_tokens & text_tokens) / len(query_tokens)
     verifier = float(row.get("verifier_score") or 0.0)
-    return round((lexical * 0.38) + (salience * 0.32) + (recency * 0.14) + kind_bonus + (verifier * 0.08), 4)
+    return round(
+        (lexical * UTILITY_LEXICAL_WEIGHT)
+        + (salience * UTILITY_SALIENCE_WEIGHT)
+        + (recency * UTILITY_RECENCY_WEIGHT)
+        + kind_bonus
+        + (verifier * UTILITY_VERIFIER_WEIGHT),
+        4,
+    )

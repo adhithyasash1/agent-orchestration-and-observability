@@ -94,9 +94,10 @@ agentos/
 │   └── reflection.py     # critique prompt
 └── api/routes.py         # /runs, /traces, /memory, /tools, /config, /health
 bench/                    # tasks + runner + report
-console/                  # Next.js App Router operator console
+console/                  # Next.js App Router operator console (primary UI)
 tests/                    # pytest suite (uses MockLLM, no network)
-ui/index.html             # minimal single-file trace viewer
+ui/index.html             # minimal fallback trace viewer, unmaintained —
+                          # kept only for zero-dep debugging via the API
 ```
 
 Components are instantiated once at FastAPI lifespan startup and attached
@@ -324,8 +325,10 @@ When `AGENTOS_ENABLE_OTEL=true`, the trace store also dual-writes spans
 through an OpenTelemetry bridge so the same run can be viewed in a
 tracing backend such as Phoenix.
 
-The static UI at `/` renders runs and their traces directly from these
-rows; the Next.js console gives you a richer operator workflow.
+The Next.js console at `console/` is the maintained operator UI. The
+static `ui/index.html` endpoint mounted at `/` is a minimal zero-dep
+fallback — it renders the same rows but is not kept in sync with new
+fields; prefer the console for day-to-day use.
 
 ---
 
@@ -342,7 +345,11 @@ rows; the Next.js console gives you a richer operator workflow.
   silently writing a row that expires immediately.
 - `/config` patches build a fresh components bundle from the new
   settings and swap `app.state.components` atomically under a lock, so
-  in-flight requests keep consistent settings.
+  in-flight requests keep consistent settings. Patches are scoped to the
+  routing flags (`enable_memory`, `enable_planner`, `enable_tools`,
+  `enable_reflection`, `enable_llm_judge`, `enable_otel`); the LLM
+  instance, memory store, and DB path are **not** swapped live — flip
+  them by restarting with different env vars.
 - Legacy memory DBs (pre-tiered schema) are migrated on startup: the
   old `memory_fts` virtual table is dropped and rebuilt with the new
   `(text, kind)` columns.

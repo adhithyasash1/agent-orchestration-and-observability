@@ -63,6 +63,14 @@ class Settings(BaseSettings):
     working_memory_ttl_seconds: int = 3600
     episodic_memory_ttl_seconds: int = 1209600
 
+    # Context packer budget ratios (fraction of context_char_budget spent on
+    # each section). Remainder goes to retrieved memory. Tuned for the
+    # default 8k budget; expose so ablations / different model sizes can
+    # shift the balance without editing source.
+    context_developer_ratio: float = 0.18
+    context_scratchpad_ratio: float = 0.16
+    context_tool_ratio: float = 0.28
+
     # API
     api_prefix: str = "/api/v1"
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:8000"]

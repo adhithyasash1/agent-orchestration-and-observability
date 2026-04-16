@@ -1,8 +1,22 @@
-"""Deterministic mock LLM."""
+"""Deterministic mock LLM.
+
+Dispatches on the `system` argument rather than scanning the rendered
+prompt body. The real call sites are narrow (planner / reflection / judge
+/ direct answer) and each pins a distinct system string, which makes this
+a much tighter discriminator than lowercasing the prompt and grepping.
+"""
 from __future__ import annotations
 
 import json
 import re
+
+
+# Tokens that uniquely identify each call site's `system` message. Keep
+# these in sync with the strings passed by the real callers (planner,
+# reflection, scorer.llm_judge, loop fallback).
+_PLANNER_SYSTEM_TOKEN = "valid json"
+_REFLECTION_SYSTEM_TOKEN = "brief critic"
+_JUDGE_SYSTEM_TOKEN = "strict grader"
 
 
 class MockLLM:
@@ -11,15 +25,26 @@ class MockLLM:
 
     async def complete(self, prompt: str, system: str | None = None) -> str:
         self._calls += 1
-        p = prompt.lower()
+        sys_text = (system or "").lower()
 
-        if "respond in json only" in p and "observation_summary" in p and "confidence" in p:
+        if _PLANNER_SYSTEM_TOKEN in sys_text:
             return self._plan(prompt)
-
-        if "critique" in p and ("answer" in p or "response" in p):
+        if _REFLECTION_SYSTEM_TOKEN in sys_text:
             return "The answer is a bit thin. Ground it more clearly in the available context."
+        if _JUDGE_SYSTEM_TOKEN in sys_text:
+            return self._judge(prompt)
 
         return self._direct_answer(prompt)
+
+    def _judge(self, prompt: str) -> str:
+        # The judge prompt includes "Candidate answer:". Give any non-empty
+        # answer a plausible mid-score so tests that flip enable_llm_judge
+        # on still see trustworthy=True when the answer matches the table.
+        answer_match = re.search(r"Candidate answer:\s*(.*)", prompt, re.DOTALL)
+        candidate = (answer_match.group(1).strip() if answer_match else "")[:400]
+        if not candidate or "don't have enough" in candidate.lower():
+            return json.dumps({"correct": 0.1, "grounded": 0.1, "reason": "empty or refusal"})
+        return json.dumps({"correct": 0.8, "grounded": 0.7, "reason": "looks grounded in context"})
 
     def _plan(self, prompt: str) -> str:
         user_line = self._extract_user(prompt)

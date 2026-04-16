@@ -19,6 +19,15 @@ Keep the final answer concise and useful.
 """.strip()
 
 
+# Fallback budget ratios when callers don't thread a Settings through.
+# Kept in sync with the defaults on `agentos.config.Settings` so the two
+# paths match. Changing production behavior should be done via env vars,
+# not by editing these constants.
+DEFAULT_DEVELOPER_RATIO = 0.18
+DEFAULT_SCRATCHPAD_RATIO = 0.16
+DEFAULT_TOOL_RATIO = 0.28
+
+
 @dataclass
 class ContextChunk:
     chunk_id: str
@@ -60,13 +69,16 @@ def pack_context(
     budget_chars: int,
     prompt_version: str,
     developer_instructions: str | None = None,
+    developer_ratio: float = DEFAULT_DEVELOPER_RATIO,
+    scratchpad_ratio: float = DEFAULT_SCRATCHPAD_RATIO,
+    tool_ratio: float = DEFAULT_TOOL_RATIO,
 ) -> PackedContext:
     budget = max(1200, int(budget_chars or 0))
     developer_text = (developer_instructions or DEFAULT_DEVELOPER_INSTRUCTIONS).strip()
 
-    developer_budget = min(1400, max(420, int(budget * 0.18)))
-    scratchpad_budget = min(1200, max(280, int(budget * 0.16)))
-    tool_budget = min(2400, max(0, int(budget * 0.28)))
+    developer_budget = min(1400, max(420, int(budget * developer_ratio)))
+    scratchpad_budget = min(1200, max(280, int(budget * scratchpad_ratio)))
+    tool_budget = min(2400, max(0, int(budget * tool_ratio)))
     memory_budget = max(320, budget - developer_budget - scratchpad_budget - tool_budget - 180)
 
     developer_chunk = ContextChunk(

@@ -59,6 +59,16 @@ class RunRequest(BaseModel):
 
 
 class ConfigPatch(BaseModel):
+    """Live-patchable feature flags.
+
+    Scope is deliberately narrow: only the per-request routing flags that
+    the loop consults every call are exposed here. The LLM instance, memory
+    store, and DB path are **not** swapped on patch — they're constructed
+    once at startup, and there is no safe way to swap them mid-flight
+    without disrupting in-flight requests or discarding local state. If
+    you need to change `llm_backend` or `db_path`, restart the process.
+    """
+
     enable_memory: bool | None = None
     enable_planner: bool | None = None
     enable_tools: bool | None = None
@@ -185,6 +195,13 @@ async def patch_config(patch: ConfigPatch, request: Request):
     and swaps `app.state.components` under a lock. In-flight requests keep
     the components reference they already resolved through Depends, so
     they finish with consistent settings rather than half-patched state.
+
+    Scope: only the routing flags in `ConfigPatch` are applied. The LLM
+    instance and memory store are reused — the loop gates every use of
+    them on the flag, so flipping a flag immediately changes behavior
+    without needing a rebuild. The tool registry and TraceStore are
+    rebuilt because tool availability (e.g. Tavily / HTTP fetch) and
+    OTEL exporter setup are decided at construction.
     """
     async with _config_lock:
         current: Components = request.app.state.components
@@ -210,15 +227,18 @@ async def patch_config(patch: ConfigPatch, request: Request):
 
 
 def _clone_settings(settings: Settings, overrides: dict[str, Any]) -> Settings:
+    """Return a copy of `settings` with `overrides` applied.
+
+    We deliberately do NOT re-run `apply_profile()` here. `apply_profile`
+    is a *profile-time* transform: the first time `Settings` is loaded,
+    it normalizes flags to match the selected profile. Re-running it on a
+    config patch would overwrite explicit intent (e.g. the user flipping
+    `enable_llm_judge` on under the minimal profile). Since patches never
+    change `profile`, there is nothing for `apply_profile` to do here.
+    """
     data = settings.model_dump()
     data.update(overrides)
-    clone = Settings(**data)
-    clone.apply_profile()
-    # apply_profile may undo some overrides (e.g. forcing mock in minimal);
-    # re-apply explicit overrides so patch intent wins.
-    for key, value in overrides.items():
-        setattr(clone, key, value)
-    return clone
+    return Settings(**data)
 
 
 @api_router.get("/health")

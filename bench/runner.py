@@ -13,7 +13,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from agentos.config import Settings  # noqa: E402
-from agentos.eval.scorer import score_expected  # noqa: E402
 from agentos.llm import build_llm  # noqa: E402
 from agentos.memory.store import MemoryStore  # noqa: E402
 from agentos.runtime import TraceStore, run_agent  # noqa: E402
@@ -30,10 +29,23 @@ ABLATIONS = {
 
 
 async def run_benchmark(label: str, profile: str, tasks_file: Path,
-                        db_path: str, max_tasks: int | None = None) -> dict:
+                        db_path: str, max_tasks: int | None = None,
+                        allow_mock: bool = False) -> dict:
     overrides = ABLATIONS[label]
     settings = Settings(profile=profile, db_path=db_path, **overrides)
     settings.apply_profile()
+
+    if settings.llm_backend == "mock" and not allow_mock:
+        # The MockLLM matches on known prompts with canned answers. Running
+        # the benchmark against it measures the mock, not the runtime. Require
+        # an explicit opt-in so the numbers below are never mistaken for real
+        # capability scores.
+        raise RuntimeError(
+            "Refusing to benchmark against the mock LLM. Run with "
+            "--profile full (uses Ollama) or pass --allow-mock if you are "
+            "deliberately measuring the runtime plumbing rather than real "
+            "model performance."
+        )
 
     llm = build_llm(settings)
     memory = MemoryStore(settings.db_path)
@@ -63,9 +75,12 @@ async def run_benchmark(label: str, profile: str, tasks_file: Path,
             )
             elapsed = time.perf_counter() - tstart
 
-            scorable_output = result.status if task.get("expected_status") else result.answer
-            sc = score_expected(scorable_output, task)
-            sc = sc if sc is not None else result.score
+            # The loop already scored the answer with the task's `expected`
+            # rules (score_answer_details picks "expected" mode when the task
+            # carries expected_contains / expected_status / expected_refusal).
+            # Using `result.score` directly keeps the stored-vs-reported
+            # score from diverging.
+            score_value = float(result.score)
 
             called_tools = [tc.get("tool") for tc in result.tool_calls]
             expected_tool = task.get("expected_tool")
@@ -78,8 +93,8 @@ async def run_benchmark(label: str, profile: str, tasks_file: Path,
                 "difficulty": task.get("difficulty"),
                 "prompt": task["prompt"],
                 "answer": result.answer,
-                "score": sc,
-                "heuristic_score": result.score,
+                "score": score_value,
+                "verification_mode": result.verification.get("mode"),
                 "tool_calls": called_tools,
                 "expected_tool": expected_tool,
                 "tool_match": tool_ok,
@@ -97,10 +112,9 @@ async def run_benchmark(label: str, profile: str, tasks_file: Path,
                 "reflection_count": result.reflection_count,
                 "reflection_roi": result.reflection_roi,
                 "initial_score": result.initial_score,
-                "final_score": result.score,
             })
             print(
-                f"  [{i}/{len(tasks)}] {task['id']:<14} score={sc:.2f} "
+                f"  [{i}/{len(tasks)}] {task['id']:<14} score={score_value:.2f} "
                 f"{result.status:<8} {int(elapsed * 1000)}ms"
             )
         except Exception as exc:
@@ -294,6 +308,15 @@ async def main():
     ap.add_argument("--max-tasks", type=int, default=None)
     ap.add_argument("--all-ablations", action="store_true",
                     help="Run every ablation back-to-back.")
+    ap.add_argument(
+        "--allow-mock",
+        action="store_true",
+        help=(
+            "Allow running the benchmark against the mock LLM. Off by "
+            "default so mock-matched scores are not confused with real "
+            "model capability."
+        ),
+    )
     args = ap.parse_args()
 
     out_dir = ROOT / "bench" / "results"
@@ -303,7 +326,14 @@ async def main():
     for label in labels:
         db = str(Path(args.db).with_name(f"bench_{label}.db"))
         Path(db).unlink(missing_ok=True)
-        summary = await run_benchmark(label, args.profile, tasks_file, db, args.max_tasks)
+        summary = await run_benchmark(
+            label,
+            args.profile,
+            tasks_file,
+            db,
+            args.max_tasks,
+            allow_mock=args.allow_mock,
+        )
         out = save(summary, out_dir)
         print_summary(summary)
         print(f"  saved:              {out.relative_to(ROOT)}")

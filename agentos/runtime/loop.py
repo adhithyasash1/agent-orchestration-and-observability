@@ -1,4 +1,20 @@
-"""Core agent loop with tiered memory, context packing, and RL logging."""
+"""Core agent loop with tiered memory, context packing, and RL logging.
+
+The public entry point is `run_agent`. It builds a per-call `_AgentRun`
+that owns all of the mutable state (step counters, tool results, the
+reflection counter, verification details, etc.) so the individual phases
+can read/write fields directly instead of passing everything through
+nonlocal closures.
+
+The phases mirror a ReAct loop:
+
+    _emit_understand -> _retrieve -> iterate(
+        _plan -> _handle_tool_or_answer -> _verify -> _maybe_reflect
+    ) -> _promote_if_trustworthy -> _finalize
+
+Each phase is small enough to read in one sitting. The orchestration lives
+in `run()` and the helpers below it.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,9 +24,16 @@ from ..config import Settings, settings as default_settings
 from ..eval.reflection import reflect
 from ..eval.scorer import llm_judge, score_answer_details
 from ..llm.protocol import LLM
+from ..memory.salience import (
+    FINAL_CANDIDATE_SALIENCE,
+    PROMOTED_FACT_SALIENCE_FLOOR,
+    TOOL_RESULT_ERROR_SALIENCE,
+    TOOL_RESULT_OK_SALIENCE,
+    USER_INPUT_SALIENCE,
+)
 from ..memory.store import MemoryStore
 from ..tools.registry import ToolRegistry
-from .context_packer import pack_context
+from .context_packer import PackedContext, pack_context
 from .planner import PlanDecision, plan_next_step
 from .trace import RLTransition, TraceEvent, TraceStore, Timer
 
@@ -47,478 +70,617 @@ async def run_agent(
     config: Settings | None = None,
     expected: dict | None = None,
 ) -> AgentResult:
-    cfg = config or default_settings
-    run_id = traces.start_run(
-        user_input,
-        cfg.profile,
-        cfg.describe()["flags"],
-        prompt_version=cfg.prompt_version,
+    run = _AgentRun(
+        user_input=user_input,
+        llm=llm,
+        tools=tools,
+        memory=memory,
+        traces=traces,
+        cfg=config or default_settings,
+        expected=expected,
     )
+    return await run.run()
 
-    step = 0
-    transition_step = 0
-    tool_results: list[dict] = []
-    total_latency = 0
-    total_tokens = 0
-    critique = ""
-    answer = ""
-    score = 0.0
-    initial_score_value: float | None = None
-    reflection_gain = 0.0
-    verification: dict[str, Any] = {}
-    memory_hits: list[dict] = []
-    prior_decisions: list[PlanDecision] = []
-    reflection_baseline: float | None = None
 
-    def next_step() -> int:
-        nonlocal step
-        step += 1
-        return step
+class _AgentRun:
+    """One invocation of the agent loop.
 
-    def next_transition_step() -> int:
-        nonlocal transition_step
-        transition_step += 1
-        return transition_step
+    Holds every piece of mutable state the phases mutate (step counters,
+    accumulated tool results, scoreboard values, reflection counter).
+    Phases are methods on this class rather than nested closures so each
+    one is small enough to read and test in isolation.
+    """
 
-    if not user_input or not user_input.strip():
-        event_step = next_step()
-        traces.log(
+    def __init__(
+        self,
+        *,
+        user_input: str,
+        llm: LLM,
+        tools: ToolRegistry,
+        memory: MemoryStore,
+        traces: TraceStore,
+        cfg: Settings,
+        expected: dict | None,
+    ) -> None:
+        self.user_input = user_input
+        self.llm = llm
+        self.tools = tools
+        self.memory = memory
+        self.traces = traces
+        self.cfg = cfg
+        self.expected = expected
+
+        self.run_id = traces.start_run(
+            user_input,
+            cfg.profile,
+            cfg.describe()["flags"],
+            prompt_version=cfg.prompt_version,
+        )
+
+        self._step = 0
+        self._transition_step = 0
+
+        self.tool_results: list[dict] = []
+        self.prior_decisions: list[PlanDecision] = []
+        self.memory_hits: list[dict] = []
+        self.critique = ""
+        self.answer = ""
+        self.score = 0.0
+        self.initial_score_value: float | None = None
+        self.reflection_gain = 0.0
+        self.reflection_count = 0
+        self.reflection_baseline: float | None = None
+        self.verification: dict[str, Any] = {}
+        self.total_latency = 0
+        self.total_tokens = 0
+        self.current_pack: PackedContext | None = None
+
+    # ------------------------------------------------------------------
+    # Orchestration
+    # ------------------------------------------------------------------
+    async def run(self) -> AgentResult:
+        if not self.user_input or not self.user_input.strip():
+            return self._finalize_rejected()
+
+        try:
+            self._stash_user_input()
+            self._emit_understand()
+            self._retrieve()
+            self.current_pack = self._pack()
+
+            for iteration in range(self.cfg.max_steps):
+                self.current_pack = self._pack()
+                decision = await self._plan(iteration)
+                if await self._maybe_run_tool(decision, iteration):
+                    continue
+                await self._produce_answer(decision)
+                await self._verify(decision)
+                if self.score >= self.cfg.eval_pass_threshold or not self.cfg.enable_reflection:
+                    break
+                await self._reflect()
+
+            self._promote_if_trustworthy()
+            final_pack = self._pack()
+            return self._finalize_ok(final_pack)
+
+        except Exception as exc:
+            return self._finalize_error(exc)
+
+    # ------------------------------------------------------------------
+    # Small helpers
+    # ------------------------------------------------------------------
+    def _next_step(self) -> int:
+        self._step += 1
+        return self._step
+
+    def _next_transition(self) -> int:
+        self._transition_step += 1
+        return self._transition_step
+
+    def _pack(self) -> PackedContext:
+        return pack_context(
+            user_input=self.user_input,
+            memory_hits=self.memory_hits,
+            tool_results=self.tool_results,
+            critique=self.critique,
+            prior_decisions=self.prior_decisions,
+            budget_chars=self.cfg.context_char_budget,
+            prompt_version=self.cfg.prompt_version,
+            developer_ratio=self.cfg.context_developer_ratio,
+            scratchpad_ratio=self.cfg.context_scratchpad_ratio,
+            tool_ratio=self.cfg.context_tool_ratio,
+        )
+
+    def _current_state(self, iteration: int) -> dict[str, Any]:
+        pack = self.current_pack
+        return {
+            "user_input": self.user_input,
+            "iteration": iteration + 1,
+            "context_ids": pack.included_ids if pack else [],
+            "retrieval_candidates": pack.retrieval_candidates if pack else [],
+            "tool_results": [
+                {
+                    "tool": item.get("tool"),
+                    "status": item.get("status"),
+                    "observation_summary": item.get("observation_summary"),
+                }
+                for item in self.tool_results[-4:]
+            ],
+            "critique": self.critique[:300],
+            "previous_score": self.score,
+        }
+
+    # ------------------------------------------------------------------
+    # Phase: empty-input rejection
+    # ------------------------------------------------------------------
+    def _finalize_rejected(self) -> AgentResult:
+        self.traces.log(
             TraceEvent(
-                run_id,
-                event_step,
+                self.run_id,
+                self._next_step(),
                 "error",
                 "input",
                 error="empty input",
-                attributes={"prompt_version": cfg.prompt_version},
+                attributes={"prompt_version": self.cfg.prompt_version},
             )
         )
-        traces.log_transition(
+        self.traces.log_transition(
             RLTransition(
-                run_id=run_id,
-                step=next_transition_step(),
+                run_id=self.run_id,
+                step=self._next_transition(),
                 stage="reject",
-                state={"user_input": user_input},
+                state={"user_input": self.user_input},
                 action={"type": "reject", "reason": "empty input"},
                 observation={"error": "empty input"},
                 reward=0.0,
                 done=True,
                 status="rejected",
-                attributes={"prompt_version": cfg.prompt_version},
+                attributes={"prompt_version": self.cfg.prompt_version},
             )
         )
-        traces.finish_run(run_id, "", 0.0, 0, 0, status="rejected")
+        self.traces.finish_run(self.run_id, "", 0.0, 0, 0, status="rejected")
         return AgentResult(
-            run_id=run_id,
+            run_id=self.run_id,
             answer="",
             score=0.0,
-            steps=step,
+            steps=self._step,
             status="rejected",
             error="empty input",
-            prompt_version=cfg.prompt_version,
-            rl_transition_count=transition_step,
+            prompt_version=self.cfg.prompt_version,
+            rl_transition_count=self._transition_step,
         )
 
-    try:
-        if cfg.enable_memory:
-            memory.add(
-                f"User request: {user_input}",
-                kind="working",
-                salience=0.64,
-                ttl_seconds=cfg.working_memory_ttl_seconds,
-                source_run_id=run_id,
-                meta={"stage": "user_input"},
-            )
+    # ------------------------------------------------------------------
+    # Phase: understand / retrieve
+    # ------------------------------------------------------------------
+    def _stash_user_input(self) -> None:
+        if not self.cfg.enable_memory:
+            return
+        self.memory.add(
+            f"User request: {self.user_input}",
+            kind="working",
+            salience=USER_INPUT_SALIENCE,
+            ttl_seconds=self.cfg.working_memory_ttl_seconds,
+            source_run_id=self.run_id,
+            meta={"stage": "user_input"},
+        )
 
-        traces.log(
+    def _emit_understand(self) -> None:
+        self.traces.log(
             TraceEvent(
-                run_id,
-                next_step(),
+                self.run_id,
+                self._next_step(),
                 "understand",
                 "input",
-                input=user_input[:2000],
-                attributes={"prompt_version": cfg.prompt_version},
+                input=self.user_input[:2000],
+                attributes={"prompt_version": self.cfg.prompt_version},
             )
         )
 
-        if cfg.enable_memory:
-            with Timer() as t:
-                memory_hits = memory.search(
-                    user_input,
-                    k=cfg.memory_search_k,
-                    min_salience=cfg.memory_min_salience,
-                )
-            initial_pack = pack_context(
-                user_input=user_input,
-                memory_hits=memory_hits,
-                tool_results=tool_results,
-                critique=critique,
-                prior_decisions=prior_decisions,
-                budget_chars=cfg.context_char_budget,
-                prompt_version=cfg.prompt_version,
+    def _retrieve(self) -> None:
+        if not self.cfg.enable_memory:
+            return
+        with Timer() as t:
+            self.memory_hits = self.memory.search(
+                self.user_input,
+                k=self.cfg.memory_search_k,
+                min_salience=self.cfg.memory_min_salience,
             )
-            traces.log(
-                TraceEvent(
-                    run_id,
-                    next_step(),
-                    "retrieve",
-                    "memory",
-                    input=user_input,
-                    output={
-                        "hits": [
-                            {
-                                "id": hit["id"],
-                                "kind": hit["kind"],
-                                "salience": hit["salience"],
-                                "utility_score": hit.get("utility_score"),
-                                "text": hit["text"][:240],
-                            }
-                            for hit in memory_hits
-                        ],
-                        "packed_context": initial_pack.summary(),
-                    },
-                    latency_ms=t.ms,
-                    attributes={
-                        "prompt_version": cfg.prompt_version,
-                        "context_ids": initial_pack.included_ids,
-                        "retrieval_candidates": initial_pack.retrieval_candidates,
-                    },
-                )
-            )
-
-        current_pack = pack_context(
-            user_input=user_input,
-            memory_hits=memory_hits,
-            tool_results=tool_results,
-            critique=critique,
-            prior_decisions=prior_decisions,
-            budget_chars=cfg.context_char_budget,
-            prompt_version=cfg.prompt_version,
-        )
-
-        for iteration in range(cfg.max_steps):
-            current_pack = pack_context(
-                user_input=user_input,
-                memory_hits=memory_hits,
-                tool_results=tool_results,
-                critique=critique,
-                prior_decisions=prior_decisions,
-                budget_chars=cfg.context_char_budget,
-                prompt_version=cfg.prompt_version,
-            )
-            state = {
-                "user_input": user_input,
-                "iteration": iteration + 1,
-                "context_ids": current_pack.included_ids,
-                "retrieval_candidates": current_pack.retrieval_candidates,
-                "tool_results": [
-                    {
-                        "tool": item.get("tool"),
-                        "status": item.get("status"),
-                        "observation_summary": item.get("observation_summary"),
-                    }
-                    for item in tool_results[-4:]
-                ],
-                "critique": critique[:300],
-                "previous_score": score,
-            }
-
-            decision = _direct_answer(user_input) if not cfg.enable_planner else None
-            if decision is None:
-                with Timer() as t:
-                    decision = await plan_next_step(
-                        llm,
-                        tools,
-                        user_input,
-                        current_pack.rendered,
-                        tool_results,
-                        critique,
-                    )
-                total_latency += t.ms
-                prior_decisions.append(decision)
-                traces.log(
-                    TraceEvent(
-                        run_id,
-                        next_step(),
-                        "plan",
-                        "planner",
-                        input={
-                            "critique": critique,
-                            "context_ids": current_pack.included_ids,
-                            "ctx_chars": len(current_pack.rendered),
-                        },
-                        output=decision.as_dict(),
-                        latency_ms=t.ms,
-                        attributes={
-                            "prompt_version": cfg.prompt_version,
-                            "context_ids": current_pack.included_ids,
-                            "retrieval_candidates": current_pack.retrieval_candidates,
-                            "confidence": decision.confidence,
-                            "stop_reason": decision.stop_reason,
-                            "observation_summary": decision.observation_summary,
-                        },
-                    )
-                )
-                traces.log_transition(
-                    RLTransition(
-                        run_id=run_id,
-                        step=next_transition_step(),
-                        stage="plan",
-                        state=state,
-                        action=decision.as_dict(),
-                        observation={"packed_context": current_pack.summary()},
-                        reward=None,
-                        done=False,
-                        status="planned",
-                        attributes={
-                            "prompt_version": cfg.prompt_version,
-                            "context_ids": current_pack.included_ids,
-                        },
-                    )
-                )
-
-            if decision.action == "call_tool" and cfg.enable_tools and decision.tool:
-                with Timer() as t:
-                    result = await tools.call(decision.tool, decision.tool_args or {})
-                total_latency += t.ms
-                tool_result = {
-                    "tool": decision.tool,
-                    "args": decision.tool_args,
-                    "status": result["status"],
-                    "output": result.get("output", ""),
-                    "observation_summary": decision.observation_summary,
-                    "iteration": iteration + 1,
-                    "latency_ms": t.ms,
-                }
-                tool_results.append(tool_result)
-                if cfg.enable_memory:
-                    memory.add(
-                        _tool_memory_text(decision.tool, decision.tool_args or {}, result),
-                        kind="working",
-                        salience=0.72 if result["status"] == "ok" else 0.44,
-                        ttl_seconds=cfg.working_memory_ttl_seconds,
-                        source_run_id=run_id,
-                        tool_used=decision.tool,
-                        meta={"status": result["status"], "args": decision.tool_args or {}},
-                    )
-                traces.log(
-                    TraceEvent(
-                        run_id,
-                        next_step(),
-                        "tool_call",
-                        decision.tool,
-                        input=decision.tool_args,
-                        output=result,
-                        latency_ms=t.ms,
-                        error=result.get("error"),
-                        attributes={
-                            "prompt_version": cfg.prompt_version,
-                            "context_ids": current_pack.included_ids,
-                            "tool_latency_ms": t.ms,
-                        },
-                    )
-                )
-                traces.log_transition(
-                    RLTransition(
-                        run_id=run_id,
-                        step=next_transition_step(),
-                        stage="tool_result",
-                        state=state,
-                        action={"tool": decision.tool, "tool_args": decision.tool_args},
-                        observation=result,
-                        reward=0.1 if result["status"] == "ok" else -0.1,
-                        done=False,
-                        status=result["status"],
-                        attributes={
-                            "prompt_version": cfg.prompt_version,
-                            "tool_latency_ms": t.ms,
-                        },
-                    )
-                )
-                continue
-
-            answer = (decision.answer or "").strip()
-            if not answer:
-                with Timer() as t:
-                    answer = await llm.complete(
-                        f"{current_pack.rendered}\n\nUser: {user_input}\n\nAnswer concisely:",
-                        system="Produce a grounded answer from the context packet.",
-                    )
-                total_latency += t.ms
-
-            verification = score_answer_details(
-                user_input,
-                answer,
-                current_pack.grounding_context,
-                expected=expected,
-            )
-            if (
-                verification["mode"] == "heuristic"
-                and cfg.enable_llm_judge
-                and expected is None
-            ):
-                verification = await llm_judge(
-                    llm,
-                    user_input,
-                    answer,
-                    current_pack.grounding_context,
-                )
-            score = float(verification["score"])
-            if initial_score_value is None:
-                initial_score_value = score
-            reflection_delta = None
-            if reflection_baseline is not None:
-                reflection_delta = round(score - reflection_baseline, 4)
-                reflection_gain += max(reflection_delta, 0.0)
-            verifier_disagreement = bool(decision.confidence >= 0.7 and score < cfg.eval_pass_threshold)
-            verification["verifier_disagreement"] = verifier_disagreement
-            verification["reflection_delta"] = reflection_delta
-
-            traces.log(
-                TraceEvent(
-                    run_id,
-                    next_step(),
-                    "verify",
-                    "scorer",
-                    input={"answer_len": len(answer), "context_ids": current_pack.included_ids},
-                    output=verification,
-                    attributes={
-                        "prompt_version": cfg.prompt_version,
-                        "context_ids": current_pack.included_ids,
-                        "verifier_score": score,
-                        "reflection_delta": reflection_delta,
-                        "verifier_disagreement": verifier_disagreement,
-                    },
-                )
-            )
-            traces.log_transition(
-                RLTransition(
-                    run_id=run_id,
-                    step=next_transition_step(),
-                    stage="verify",
-                    state=state,
-                    action={"type": "answer", "answer": answer[:400], "confidence": decision.confidence},
-                    observation=verification,
-                    reward=score,
-                    done=score >= cfg.eval_pass_threshold,
-                    status="pass" if score >= cfg.eval_pass_threshold else "retry",
-                    attributes={
-                        "prompt_version": cfg.prompt_version,
-                        "context_ids": current_pack.included_ids,
-                    },
-                )
-            )
-
-            if score >= cfg.eval_pass_threshold or not cfg.enable_reflection:
-                break
-
-            with Timer() as t:
-                critique = await reflect(llm, user_input, answer, current_pack.grounding_context)
-            total_latency += t.ms
-            reflection_baseline = score
-            traces.log(
-                TraceEvent(
-                    run_id,
-                    next_step(),
-                    "reflect",
-                    "reflection",
-                    input={"score": score},
-                    output={"critique": critique[:400]},
-                    latency_ms=t.ms,
-                    attributes={
-                        "prompt_version": cfg.prompt_version,
-                        "context_ids": current_pack.included_ids,
-                        "reflection_delta": 0.0,
-                    },
-                )
-            )
-            traces.log_transition(
-                RLTransition(
-                    run_id=run_id,
-                    step=next_transition_step(),
-                    stage="reflection",
-                    state={"answer": answer[:400], "score": score, "critique": critique[:300]},
-                    action={"retry": True, "reason": "score_below_threshold"},
-                    observation={"next_iteration": iteration + 2},
-                    reward=0.0,
-                    done=False,
-                    status="retry",
-                    attributes={"prompt_version": cfg.prompt_version},
-                )
-            )
-
-        if cfg.enable_memory:
-            memory.add(
-                f"Candidate answer: {answer}",
-                kind="working",
-                salience=0.58,
-                ttl_seconds=cfg.working_memory_ttl_seconds,
-                source_run_id=run_id,
-                tool_used=tool_results[-1]["tool"] if tool_results else None,
-                verifier_score=score,
-                meta={"stage": "final_candidate"},
-            )
-            if (
-                score >= cfg.eval_pass_threshold
-                and answer.strip()
-                and verification.get("trustworthy")
-            ):
-                memory.promote_verified_fact(
-                    user_input=user_input,
-                    answer=answer,
-                    run_id=run_id,
-                    tool_used=tool_results[-1]["tool"] if tool_results else None,
-                    verifier_score=score,
-                    salience=max(0.7, score),
-                    episodic_ttl_seconds=cfg.episodic_memory_ttl_seconds,
-                )
-
-        final_pack = pack_context(
-            user_input=user_input,
-            memory_hits=memory_hits,
-            tool_results=tool_results,
-            critique=critique,
-            prior_decisions=prior_decisions,
-            budget_chars=cfg.context_char_budget,
-            prompt_version=cfg.prompt_version,
-        )
-        traces.log(
+        initial_pack = self._pack()
+        self.traces.log(
             TraceEvent(
-                run_id,
-                next_step(),
-                "final",
-                "answer",
-                output={"answer": answer[:2000], "score": score},
+                self.run_id,
+                self._next_step(),
+                "retrieve",
+                "memory",
+                input=self.user_input,
+                output={
+                    "hits": [
+                        {
+                            "id": hit["id"],
+                            "kind": hit["kind"],
+                            "salience": hit["salience"],
+                            "utility_score": hit.get("utility_score"),
+                            "text": hit["text"][:240],
+                        }
+                        for hit in self.memory_hits
+                    ],
+                    "packed_context": initial_pack.summary(),
+                },
+                latency_ms=t.ms,
                 attributes={
-                    "prompt_version": cfg.prompt_version,
-                    "context_ids": final_pack.included_ids,
-                    "verifier_score": score,
+                    "prompt_version": self.cfg.prompt_version,
+                    "context_ids": initial_pack.included_ids,
+                    "retrieval_candidates": initial_pack.retrieval_candidates,
                 },
             )
         )
-        traces.log_transition(
+
+    # ------------------------------------------------------------------
+    # Phase: plan
+    # ------------------------------------------------------------------
+    async def _plan(self, iteration: int) -> PlanDecision:
+        if not self.cfg.enable_planner:
+            return _direct_answer()
+
+        with Timer() as t:
+            decision = await plan_next_step(
+                self.llm,
+                self.tools,
+                self.user_input,
+                self.current_pack.rendered,
+                self.tool_results,
+                self.critique,
+            )
+        self.total_latency += t.ms
+        self.prior_decisions.append(decision)
+
+        pack = self.current_pack
+        self.traces.log(
+            TraceEvent(
+                self.run_id,
+                self._next_step(),
+                "plan",
+                "planner",
+                input={
+                    "critique": self.critique,
+                    "context_ids": pack.included_ids,
+                    "ctx_chars": len(pack.rendered),
+                },
+                output=decision.as_dict(),
+                latency_ms=t.ms,
+                attributes={
+                    "prompt_version": self.cfg.prompt_version,
+                    "context_ids": pack.included_ids,
+                    "retrieval_candidates": pack.retrieval_candidates,
+                    "confidence": decision.confidence,
+                    "stop_reason": decision.stop_reason,
+                    "observation_summary": decision.observation_summary,
+                },
+            )
+        )
+        self.traces.log_transition(
             RLTransition(
-                run_id=run_id,
-                step=next_transition_step(),
-                stage="final",
-                state={"user_input": user_input},
-                action={"type": "finalize"},
-                observation={"answer": answer[:400], "score": score},
-                reward=score,
-                done=True,
-                status="ok",
-                attributes={"prompt_version": cfg.prompt_version},
+                run_id=self.run_id,
+                step=self._next_transition(),
+                stage="plan",
+                state=self._current_state(iteration),
+                action=decision.as_dict(),
+                observation={"packed_context": pack.summary()},
+                reward=None,
+                done=False,
+                status="planned",
+                attributes={
+                    "prompt_version": self.cfg.prompt_version,
+                    "context_ids": pack.included_ids,
+                },
+            )
+        )
+        return decision
+
+    # ------------------------------------------------------------------
+    # Phase: tool dispatch
+    # ------------------------------------------------------------------
+    async def _maybe_run_tool(self, decision: PlanDecision, iteration: int) -> bool:
+        if not (decision.action == "call_tool" and self.cfg.enable_tools and decision.tool):
+            return False
+
+        with Timer() as t:
+            result = await self.tools.call(decision.tool, decision.tool_args or {})
+        self.total_latency += t.ms
+
+        tool_result = {
+            "tool": decision.tool,
+            "args": decision.tool_args,
+            "status": result["status"],
+            "output": result.get("output", ""),
+            "observation_summary": decision.observation_summary,
+            "iteration": iteration + 1,
+            "latency_ms": t.ms,
+        }
+        self.tool_results.append(tool_result)
+
+        if self.cfg.enable_memory:
+            self.memory.add(
+                _tool_memory_text(decision.tool, decision.tool_args or {}, result),
+                kind="working",
+                salience=(
+                    TOOL_RESULT_OK_SALIENCE
+                    if result["status"] == "ok"
+                    else TOOL_RESULT_ERROR_SALIENCE
+                ),
+                ttl_seconds=self.cfg.working_memory_ttl_seconds,
+                source_run_id=self.run_id,
+                tool_used=decision.tool,
+                meta={"status": result["status"], "args": decision.tool_args or {}},
+            )
+
+        pack = self.current_pack
+        self.traces.log(
+            TraceEvent(
+                self.run_id,
+                self._next_step(),
+                "tool_call",
+                decision.tool,
+                input=decision.tool_args,
+                output=result,
+                latency_ms=t.ms,
+                error=result.get("error"),
+                attributes={
+                    "prompt_version": self.cfg.prompt_version,
+                    "context_ids": pack.included_ids,
+                    "tool_latency_ms": t.ms,
+                },
+            )
+        )
+        self.traces.log_transition(
+            RLTransition(
+                run_id=self.run_id,
+                step=self._next_transition(),
+                stage="tool_result",
+                state=self._current_state(iteration),
+                action={"tool": decision.tool, "tool_args": decision.tool_args},
+                observation=result,
+                reward=0.1 if result["status"] == "ok" else -0.1,
+                done=False,
+                status=result["status"],
+                attributes={
+                    "prompt_version": self.cfg.prompt_version,
+                    "tool_latency_ms": t.ms,
+                },
+            )
+        )
+        return True
+
+    # ------------------------------------------------------------------
+    # Phase: answer
+    # ------------------------------------------------------------------
+    async def _produce_answer(self, decision: PlanDecision) -> None:
+        self.answer = (decision.answer or "").strip()
+        if self.answer:
+            return
+        with Timer() as t:
+            self.answer = await self.llm.complete(
+                f"{self.current_pack.rendered}\n\nUser: {self.user_input}\n\nAnswer concisely:",
+                system="Produce a grounded answer from the context packet.",
+            )
+        self.total_latency += t.ms
+
+    # ------------------------------------------------------------------
+    # Phase: verify
+    # ------------------------------------------------------------------
+    async def _verify(self, decision: PlanDecision) -> None:
+        pack = self.current_pack
+        verification = score_answer_details(
+            self.user_input,
+            self.answer,
+            pack.grounding_context,
+            expected=self.expected,
+        )
+        # Kick the LLM judge in for live (no-ground-truth) runs when the
+        # heuristic is all we have and the operator opted in.
+        if (
+            verification["mode"] == "heuristic"
+            and self.cfg.enable_llm_judge
+            and self.expected is None
+        ):
+            verification = await llm_judge(
+                self.llm,
+                self.user_input,
+                self.answer,
+                pack.grounding_context,
+            )
+        self._apply_verification(decision, verification)
+
+    def _apply_verification(self, decision: PlanDecision, verification: dict[str, Any]) -> None:
+        self.score = float(verification["score"])
+        if self.initial_score_value is None:
+            self.initial_score_value = self.score
+
+        reflection_delta = None
+        if self.reflection_baseline is not None:
+            reflection_delta = round(self.score - self.reflection_baseline, 4)
+            self.reflection_gain += max(reflection_delta, 0.0)
+
+        verifier_disagreement = bool(
+            decision.confidence >= 0.7 and self.score < self.cfg.eval_pass_threshold
+        )
+        verification["verifier_disagreement"] = verifier_disagreement
+        verification["reflection_delta"] = reflection_delta
+        self.verification = verification
+
+        pack = self.current_pack
+        self.traces.log(
+            TraceEvent(
+                self.run_id,
+                self._next_step(),
+                "verify",
+                "scorer",
+                input={"answer_len": len(self.answer), "context_ids": pack.included_ids},
+                output=verification,
+                attributes={
+                    "prompt_version": self.cfg.prompt_version,
+                    "context_ids": pack.included_ids,
+                    "verifier_score": self.score,
+                    "reflection_delta": reflection_delta,
+                    "verifier_disagreement": verifier_disagreement,
+                },
+            )
+        )
+        self.traces.log_transition(
+            RLTransition(
+                run_id=self.run_id,
+                step=self._next_transition(),
+                stage="verify",
+                state=self._current_state(iteration=len(self.prior_decisions)),
+                action={
+                    "type": "answer",
+                    "answer": self.answer[:400],
+                    "confidence": decision.confidence,
+                },
+                observation=verification,
+                reward=self.score,
+                done=self.score >= self.cfg.eval_pass_threshold,
+                status="pass" if self.score >= self.cfg.eval_pass_threshold else "retry",
+                attributes={
+                    "prompt_version": self.cfg.prompt_version,
+                    "context_ids": pack.included_ids,
+                },
             )
         )
 
-        traces.finish_run(run_id, answer, score, total_latency, total_tokens, status="ok")
+    # ------------------------------------------------------------------
+    # Phase: reflect
+    # ------------------------------------------------------------------
+    async def _reflect(self) -> None:
+        pack = self.current_pack
+        with Timer() as t:
+            self.critique = await reflect(
+                self.llm,
+                self.user_input,
+                self.answer,
+                pack.grounding_context,
+            )
+        self.total_latency += t.ms
+        self.reflection_baseline = self.score
+        self.reflection_count += 1
+
+        self.traces.log(
+            TraceEvent(
+                self.run_id,
+                self._next_step(),
+                "reflect",
+                "reflection",
+                input={"score": self.score},
+                output={"critique": self.critique[:400]},
+                latency_ms=t.ms,
+                attributes={
+                    "prompt_version": self.cfg.prompt_version,
+                    "context_ids": pack.included_ids,
+                    "reflection_delta": 0.0,
+                },
+            )
+        )
+        self.traces.log_transition(
+            RLTransition(
+                run_id=self.run_id,
+                step=self._next_transition(),
+                stage="reflection",
+                state={
+                    "answer": self.answer[:400],
+                    "score": self.score,
+                    "critique": self.critique[:300],
+                },
+                action={"retry": True, "reason": "score_below_threshold"},
+                observation={"next_iteration": len(self.prior_decisions) + 1},
+                reward=0.0,
+                done=False,
+                status="retry",
+                attributes={"prompt_version": self.cfg.prompt_version},
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # Phase: promotion
+    # ------------------------------------------------------------------
+    def _promote_if_trustworthy(self) -> None:
+        if not self.cfg.enable_memory:
+            return
+
+        self.memory.add(
+            f"Candidate answer: {self.answer}",
+            kind="working",
+            salience=FINAL_CANDIDATE_SALIENCE,
+            ttl_seconds=self.cfg.working_memory_ttl_seconds,
+            source_run_id=self.run_id,
+            tool_used=self.tool_results[-1]["tool"] if self.tool_results else None,
+            verifier_score=self.score,
+            meta={"stage": "final_candidate"},
+        )
+
+        if (
+            self.score >= self.cfg.eval_pass_threshold
+            and self.answer.strip()
+            and self.verification.get("trustworthy")
+        ):
+            self.memory.promote_verified_fact(
+                user_input=self.user_input,
+                answer=self.answer,
+                run_id=self.run_id,
+                tool_used=self.tool_results[-1]["tool"] if self.tool_results else None,
+                verifier_score=self.score,
+                salience=max(PROMOTED_FACT_SALIENCE_FLOOR, self.score),
+                episodic_ttl_seconds=self.cfg.episodic_memory_ttl_seconds,
+            )
+
+    # ------------------------------------------------------------------
+    # Phase: finalize (ok / error)
+    # ------------------------------------------------------------------
+    def _finalize_ok(self, final_pack: PackedContext) -> AgentResult:
+        self.traces.log(
+            TraceEvent(
+                self.run_id,
+                self._next_step(),
+                "final",
+                "answer",
+                output={"answer": self.answer[:2000], "score": self.score},
+                attributes={
+                    "prompt_version": self.cfg.prompt_version,
+                    "context_ids": final_pack.included_ids,
+                    "verifier_score": self.score,
+                },
+            )
+        )
+        self.traces.log_transition(
+            RLTransition(
+                run_id=self.run_id,
+                step=self._next_transition(),
+                stage="final",
+                state={"user_input": self.user_input},
+                action={"type": "finalize"},
+                observation={"answer": self.answer[:400], "score": self.score},
+                reward=self.score,
+                done=True,
+                status="ok",
+                attributes={"prompt_version": self.cfg.prompt_version},
+            )
+        )
+        self.traces.finish_run(
+            self.run_id,
+            self.answer,
+            self.score,
+            self.total_latency,
+            self.total_tokens,
+            status="ok",
+        )
         return AgentResult(
-            run_id=run_id,
-            answer=answer,
-            score=score,
-            steps=step,
-            tool_calls=tool_results,
-            total_latency_ms=total_latency,
-            total_tokens=total_tokens,
+            run_id=self.run_id,
+            answer=self.answer,
+            score=self.score,
+            steps=self._step,
+            tool_calls=self.tool_results,
+            total_latency_ms=self.total_latency,
+            total_tokens=self.total_tokens,
             memory_hits=[
                 {
                     "id": hit["id"],
@@ -526,60 +688,72 @@ async def run_agent(
                     "salience": hit["salience"],
                     "utility_score": hit.get("utility_score"),
                 }
-                for hit in memory_hits
+                for hit in self.memory_hits
             ],
             context_ids=final_pack.included_ids,
             retrieval_candidates=final_pack.retrieval_candidates,
-            reflection_count=transition_step_count("reflection", traces.get_run(run_id)),
-            reflection_roi=round(reflection_gain, 4),
-            rl_transition_count=transition_step,
-            prompt_version=cfg.prompt_version,
-            verification=verification,
-            initial_score=initial_score_value or 0.0,
+            reflection_count=self.reflection_count,
+            reflection_roi=round(self.reflection_gain, 4),
+            rl_transition_count=self._transition_step,
+            prompt_version=self.cfg.prompt_version,
+            verification=self.verification,
+            initial_score=self.initial_score_value or 0.0,
         )
 
-    except Exception as e:
-        traces.log(
+    def _finalize_error(self, exc: Exception) -> AgentResult:
+        self.traces.log(
             TraceEvent(
-                run_id,
-                next_step(),
+                self.run_id,
+                self._next_step(),
                 "error",
                 "loop",
-                error=str(e),
-                attributes={"prompt_version": cfg.prompt_version},
+                error=str(exc),
+                attributes={"prompt_version": self.cfg.prompt_version},
             )
         )
-        traces.log_transition(
+        self.traces.log_transition(
             RLTransition(
-                run_id=run_id,
-                step=next_transition_step(),
+                run_id=self.run_id,
+                step=self._next_transition(),
                 stage="error",
-                state={"user_input": user_input},
+                state={"user_input": self.user_input},
                 action={"type": "error"},
-                observation={"error": str(e)},
+                observation={"error": str(exc)},
                 reward=-1.0,
                 done=True,
                 status="error",
-                attributes={"prompt_version": cfg.prompt_version},
+                attributes={"prompt_version": self.cfg.prompt_version},
             )
         )
-        traces.finish_run(run_id, answer, score, total_latency, total_tokens, status="error")
-        return AgentResult(
-            run_id=run_id,
-            answer=answer,
-            score=score,
-            steps=step,
+        self.traces.finish_run(
+            self.run_id,
+            self.answer,
+            self.score,
+            self.total_latency,
+            self.total_tokens,
             status="error",
-            error=str(e),
-            memory_hits=memory_hits,
-            prompt_version=cfg.prompt_version,
-            rl_transition_count=transition_step,
-            verification=verification,
-            initial_score=initial_score_value or 0.0,
+        )
+        return AgentResult(
+            run_id=self.run_id,
+            answer=self.answer,
+            score=self.score,
+            steps=self._step,
+            status="error",
+            error=str(exc),
+            memory_hits=self.memory_hits,
+            prompt_version=self.cfg.prompt_version,
+            rl_transition_count=self._transition_step,
+            verification=self.verification,
+            initial_score=self.initial_score_value or 0.0,
         )
 
 
-def _direct_answer(user_input: str) -> PlanDecision:
+# ----------------------------------------------------------------------
+# Public stateless helpers
+# ----------------------------------------------------------------------
+
+def _direct_answer() -> PlanDecision:
+    """Synthetic PlanDecision used when the planner is disabled."""
     return PlanDecision(
         goal="Answer the user directly because planning is disabled.",
         action="answer",
@@ -598,9 +772,3 @@ def _tool_memory_text(tool_name: str, tool_args: dict, result: dict) -> str:
         f"Tool {tool_name} was called with args {tool_args}. "
         f"Status: {result.get('status')}. Output: {str(result.get('output'))[:500]}"
     )
-
-
-def transition_step_count(stage: str, run: dict | None) -> int:
-    if not run:
-        return 0
-    return sum(1 for item in run.get("transitions", []) if item.get("stage") == stage)
