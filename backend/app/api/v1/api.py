@@ -1,10 +1,49 @@
 from fastapi import APIRouter
+from pydantic import BaseModel
 from .chat import router as chat_router
 from .runs import router as runs_router
 from .memory import router as memory_router
 from .tools import router as tools_router
 
 api_router = APIRouter()
+
+
+# ---------------------------------------------------------------------------
+# Benchmark config endpoint — allows the runner to toggle feature flags
+# ---------------------------------------------------------------------------
+
+class BenchmarkConfig(BaseModel):
+    ENABLE_MEMORY: bool | None = None
+    ENABLE_RERANKER: bool | None = None
+    ENABLE_EVAL_LOOP: bool | None = None
+    ENABLE_TOOLS: bool | None = None
+    ENABLE_GRAPH: bool | None = None
+
+
+@api_router.get("/config")
+async def get_config():
+    """Return current feature flag state."""
+    from app.core.config import settings
+    return {
+        "ENABLE_MEMORY": settings.ENABLE_MEMORY,
+        "ENABLE_RERANKER": settings.ENABLE_RERANKER,
+        "ENABLE_EVAL_LOOP": settings.ENABLE_EVAL_LOOP,
+        "ENABLE_TOOLS": settings.ENABLE_TOOLS,
+        "ENABLE_GRAPH": settings.ENABLE_GRAPH,
+    }
+
+
+@api_router.put("/config")
+async def update_config(config: BenchmarkConfig):
+    """Update feature flags at runtime (for benchmark ablation)."""
+    from app.core.config import settings
+    changed = {}
+    for field, value in config.model_dump(exclude_none=True).items():
+        old = getattr(settings, field)
+        setattr(settings, field, value)
+        changed[field] = {"old": old, "new": value}
+    return {"updated": changed, "current": await get_config()}
+
 
 @api_router.get("/health")
 async def health():

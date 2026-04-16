@@ -55,5 +55,13 @@ class Settings(BaseSettings):
     CONSOLIDATION_PRUNE_THRESHOLD: float = 0.3  # tasks below this score get pruned
     CONSOLIDATION_COMPRESS_MIN_CHARS: int = 500  # only compress episodes longer than this
 
+    # --- Ablation feature flags ---
+    # Toggle subsystems on/off for benchmarking. All True = full system.
+    ENABLE_MEMORY: bool = True          # 3-tier memory retrieval in planner
+    ENABLE_RERANKER: bool = True        # FlashRank cross-encoder reranking
+    ENABLE_EVAL_LOOP: bool = True       # critique-then-score evaluator + retry loop
+    ENABLE_TOOLS: bool = True           # executor tool calls (search, browse, MCP)
+    ENABLE_GRAPH: bool = True           # Neo4j graph memory specifically
+
 
 settings = Settings()

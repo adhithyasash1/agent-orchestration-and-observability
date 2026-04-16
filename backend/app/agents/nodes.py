@@ -117,28 +117,40 @@ async def _retrieve_vector(query: str) -> str:
     """Tier 1: Chroma vector similarity search + FlashRank reranking.
 
     Fetches 3x candidates, reranks with cross-encoder, keeps top-k.
+    Disabled when ENABLE_MEMORY=False.
     """
+    if not settings.ENABLE_MEMORY:
+        return ""
     try:
-        from app.tools.reranker import rerank
+        if settings.ENABLE_RERANKER:
+            from app.tools.reranker import rerank
 
-        # Fetch more candidates than needed for reranking
-        fetch_k = settings.VECTOR_SEARCH_K * settings.RERANK_FETCH_MULTIPLIER
-        docs = await memory.vector_store.asimilarity_search(query, k=fetch_k)
-        if not docs:
-            return ""
+            # Fetch more candidates than needed for reranking
+            fetch_k = settings.VECTOR_SEARCH_K * settings.RERANK_FETCH_MULTIPLIER
+            docs = await memory.vector_store.asimilarity_search(query, k=fetch_k)
+            if not docs:
+                return ""
 
-        texts = [doc.page_content for doc in docs]
-
-        # Rerank with cross-encoder (falls back to original order if unavailable)
-        reranked = rerank(query, texts, top_k=settings.VECTOR_SEARCH_K)
-        return "\n".join(reranked)
+            texts = [doc.page_content for doc in docs]
+            reranked = rerank(query, texts, top_k=settings.VECTOR_SEARCH_K)
+            return "\n".join(reranked)
+        else:
+            # No reranker — plain cosine similarity
+            docs = await memory.vector_store.asimilarity_search(
+                query, k=settings.VECTOR_SEARCH_K
+            )
+            return "\n".join(doc.page_content for doc in docs) if docs else ""
     except Exception as e:
         logger.warning(f"Vector search skipped: {e}")
     return ""
 
 
 async def _retrieve_episodic(query: str) -> str:
-    """Tier 2: Mem0 episodic memory — past successful interactions."""
+    """Tier 2: Mem0 episodic memory — past successful interactions.
+    Disabled when ENABLE_MEMORY=False.
+    """
+    if not settings.ENABLE_MEMORY:
+        return ""
     try:
         episodes = await memory.search_episodes(query, limit=settings.EPISODIC_SEARCH_K)
         if episodes:
@@ -155,7 +167,10 @@ async def _retrieve_graph(query: str) -> str:
 
     Prefers compiled truth summaries when available, falls back to raw
     task intents for entities that haven't been compiled yet.
+    Disabled when ENABLE_MEMORY=False or ENABLE_GRAPH=False.
     """
+    if not settings.ENABLE_MEMORY or not settings.ENABLE_GRAPH:
+        return ""
     try:
         graph_results = await memory.search_graph(query, limit=settings.GRAPH_SEARCH_K)
         if graph_results:
@@ -217,6 +232,12 @@ def _build_tool_context(tool_outputs: list) -> str:
 @observe()
 async def executor_node(state: AgentState) -> Dict[str, Any]:
     logger.info("EXECUTING")
+
+    # Ablation: skip all tools when disabled
+    if not settings.ENABLE_TOOLS:
+        logger.info("  Tools disabled (ablation)")
+        return {"tool_outputs": [{"tool": "none", "status": "success", "info": "Tools disabled."}]}
+
     plan = state.get("current_plan", "")
     user_input = state["messages"][0].content if state["messages"] else ""
     combined_text = f"{user_input}\n{plan}"
@@ -368,6 +389,15 @@ async def evaluator_node(state: AgentState) -> Dict[str, Any]:
     iteration = state.get("iteration", 1)
     last_message = state["messages"][-1].content
     initial_input = state["messages"][0].content
+
+    # Ablation: skip eval loop — auto-pass on first iteration
+    if not settings.ENABLE_EVAL_LOOP:
+        logger.info("  Eval loop disabled (ablation) — auto-pass")
+        return {
+            "eval_score": 1.0,
+            "eval_critique": "Eval loop disabled.",
+            "is_complete": True,
+        }
 
     score, critique = await evaluate_response(
         initial_input, last_message, [

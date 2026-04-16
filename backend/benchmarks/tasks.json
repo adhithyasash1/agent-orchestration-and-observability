@@ -1,0 +1,234 @@
+{
+  "version": "1.0",
+  "description": "AgentOS benchmark suite — 30 fixed tasks across 5 categories",
+  "tasks": [
+    {
+      "id": "know-01",
+      "category": "knowledge",
+      "prompt": "What is the capital of France?",
+      "expected_contains": ["Paris"],
+      "difficulty": "easy"
+    },
+    {
+      "id": "know-02",
+      "category": "knowledge",
+      "prompt": "Explain the difference between a list and a tuple in Python.",
+      "expected_contains": ["mutable", "immutable"],
+      "difficulty": "easy"
+    },
+    {
+      "id": "know-03",
+      "category": "knowledge",
+      "prompt": "What is the time complexity of binary search?",
+      "expected_contains": ["log"],
+      "difficulty": "easy"
+    },
+    {
+      "id": "know-04",
+      "category": "knowledge",
+      "prompt": "Explain what a REST API is in 2-3 sentences.",
+      "expected_contains": ["HTTP", "resource"],
+      "difficulty": "easy"
+    },
+    {
+      "id": "know-05",
+      "category": "knowledge",
+      "prompt": "What are the ACID properties in databases?",
+      "expected_contains": ["Atomicity", "Consistency", "Isolation", "Durability"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "know-06",
+      "category": "knowledge",
+      "prompt": "What is the difference between supervised and unsupervised learning?",
+      "expected_contains": ["label"],
+      "difficulty": "easy"
+    },
+    {
+      "id": "tool-01",
+      "category": "tool_use",
+      "prompt": "Search the web for the current population of Tokyo.",
+      "expected_tool": "tavily_search",
+      "expected_contains": ["million"],
+      "difficulty": "easy"
+    },
+    {
+      "id": "tool-02",
+      "category": "tool_use",
+      "prompt": "Summarize the content of https://httpbin.org/html",
+      "expected_tool": "tavily_extract",
+      "expected_contains": ["Moby"],
+      "difficulty": "easy"
+    },
+    {
+      "id": "tool-03",
+      "category": "tool_use",
+      "prompt": "Search for the latest news about climate change.",
+      "expected_tool": "tavily_search",
+      "expected_contains": [],
+      "difficulty": "easy"
+    },
+    {
+      "id": "tool-04",
+      "category": "tool_use",
+      "prompt": "Find information about the top machine learning models on HuggingFace.",
+      "expected_tool": "mcp:huggingface",
+      "expected_contains": [],
+      "difficulty": "medium"
+    },
+    {
+      "id": "tool-05",
+      "category": "tool_use",
+      "prompt": "What is the latest version of Python? Search the web to find out.",
+      "expected_tool": "tavily_search",
+      "expected_contains": ["3."],
+      "difficulty": "easy"
+    },
+    {
+      "id": "tool-06",
+      "category": "tool_use",
+      "prompt": "Search for recent papers about transformer architectures.",
+      "expected_tool": "tavily_search",
+      "expected_contains": ["transformer"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "multi-01",
+      "category": "multi_step",
+      "prompt": "Search for what FastAPI is, then explain how it compares to Flask.",
+      "expected_tool": "tavily_search",
+      "expected_contains": ["FastAPI", "Flask"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "multi-02",
+      "category": "multi_step",
+      "prompt": "Find the Wikipedia page for Alan Turing and summarize his key contributions to computer science.",
+      "expected_tool": "tavily_search",
+      "expected_contains": ["Turing"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "multi-03",
+      "category": "multi_step",
+      "prompt": "Search for what LangGraph is and explain how it differs from LangChain.",
+      "expected_tool": "tavily_search",
+      "expected_contains": ["LangGraph", "LangChain"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "multi-04",
+      "category": "multi_step",
+      "prompt": "Find the latest news about SpaceX and summarize the top 3 developments.",
+      "expected_tool": "tavily_search",
+      "expected_contains": ["SpaceX"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "multi-05",
+      "category": "multi_step",
+      "prompt": "What are vector databases? Search for examples and compare at least two of them.",
+      "expected_tool": "tavily_search",
+      "expected_contains": ["vector"],
+      "difficulty": "hard"
+    },
+    {
+      "id": "multi-06",
+      "category": "multi_step",
+      "prompt": "Explain what RAG is in AI, then search for recent improvements to RAG systems.",
+      "expected_tool": "tavily_search",
+      "expected_contains": ["retrieval", "generation"],
+      "difficulty": "hard"
+    },
+    {
+      "id": "fail-01",
+      "category": "failure_handling",
+      "prompt": "Summarize this URL: https://thisdomaindoesnotexist12345.com/page",
+      "expected_behavior": "graceful_failure",
+      "expected_contains": [],
+      "difficulty": "easy"
+    },
+    {
+      "id": "fail-02",
+      "category": "failure_handling",
+      "prompt": "",
+      "expected_behavior": "reject_empty",
+      "expected_contains": [],
+      "difficulty": "easy"
+    },
+    {
+      "id": "fail-03",
+      "category": "failure_handling",
+      "prompt": "asdkjf laksjdf lkasjdf lkajsdf random gibberish text with no meaning whatsoever",
+      "expected_behavior": "handle_nonsense",
+      "expected_contains": [],
+      "difficulty": "easy"
+    },
+    {
+      "id": "fail-04",
+      "category": "failure_handling",
+      "prompt": "What is the answer to life, the universe, and everything? Give me the exact numerical answer and nothing else.",
+      "expected_contains": ["42"],
+      "expected_behavior": "handle_ambiguous",
+      "difficulty": "easy"
+    },
+    {
+      "id": "fail-05",
+      "category": "failure_handling",
+      "prompt": "Tell me about the company Xylophonics Inc founded in 2025 that revolutionized quantum computing with their patented ZetaChip technology.",
+      "expected_behavior": "detect_fabrication",
+      "expected_contains": [],
+      "difficulty": "hard"
+    },
+    {
+      "id": "fail-06",
+      "category": "failure_handling",
+      "prompt": "Write me a 50000 word essay about the history of mathematics from ancient times to the present day.",
+      "expected_behavior": "handle_unreasonable",
+      "expected_contains": [],
+      "difficulty": "medium"
+    },
+    {
+      "id": "reason-01",
+      "category": "reasoning",
+      "prompt": "If a train leaves New York at 60 mph and another leaves Chicago at 80 mph toward each other, and the cities are 790 miles apart, how long until they meet?",
+      "expected_contains": ["5.64", "5.6", "approximately 5", "about 5"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "reason-02",
+      "category": "reasoning",
+      "prompt": "I have 3 red balls and 2 blue balls in a bag. If I pick 2 balls without replacement, what is the probability both are red?",
+      "expected_contains": ["3/10", "0.3", "30%"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "reason-03",
+      "category": "reasoning",
+      "prompt": "A farmer has 100 meters of fencing. What dimensions of a rectangular field would maximize the enclosed area?",
+      "expected_contains": ["25"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "reason-04",
+      "category": "reasoning",
+      "prompt": "Sort these numbers and find the median: 7, 2, 9, 4, 5, 1, 8",
+      "expected_contains": ["5"],
+      "difficulty": "easy"
+    },
+    {
+      "id": "reason-05",
+      "category": "reasoning",
+      "prompt": "If you have a 3x3 grid and need to fill it with numbers 1-9 so each row and column sums to 15, what goes in the center?",
+      "expected_contains": ["5"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "reason-06",
+      "category": "reasoning",
+      "prompt": "A palindrome reads the same forwards and backwards. What is the largest 3-digit palindrome that is divisible by 7?",
+      "expected_contains": ["979"],
+      "difficulty": "hard"
+    }
+  ]
+}
