@@ -86,6 +86,16 @@ class Settings(BaseSettings):
           fetch available, auto-switch to ollama when the backend has
           been left at its mock default.
         """
+        ratio_sum = self.context_developer_ratio + self.context_scratchpad_ratio + self.context_tool_ratio
+        if ratio_sum >= 1.0:
+            raise ValueError(
+                f"Context budget ratios sum to {ratio_sum:.2f} "
+                f"(developer={self.context_developer_ratio}, "
+                f"scratchpad={self.context_scratchpad_ratio}, "
+                f"tool={self.context_tool_ratio}). "
+                f"They must sum to less than 1.0 to leave room for retrieved memory."
+            )
+
         if self.profile == "minimal":
             self.llm_backend = "mock"
             self.enable_http_fetch = False

@@ -76,6 +76,14 @@ def pack_context(
     budget = max(1200, int(budget_chars or 0))
     developer_text = (developer_instructions or DEFAULT_DEVELOPER_INSTRUCTIONS).strip()
 
+    ratio_sum = developer_ratio + scratchpad_ratio + tool_ratio
+    if ratio_sum >= 1.0:
+        raise ValueError(
+            f"Context budget ratios sum to {ratio_sum:.2f} (developer={developer_ratio}, "
+            f"scratchpad={scratchpad_ratio}, tool={tool_ratio}). "
+            f"They must sum to less than 1.0 to leave room for retrieved memory."
+        )
+
     developer_budget = min(1400, max(420, int(budget * developer_ratio)))
     scratchpad_budget = min(1200, max(280, int(budget * scratchpad_ratio)))
     tool_budget = min(2400, max(0, int(budget * tool_ratio)))

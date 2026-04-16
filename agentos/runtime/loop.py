@@ -154,7 +154,7 @@ class _AgentRun:
                 if await self._maybe_run_tool(decision, iteration):
                     continue
                 await self._produce_answer(decision)
-                await self._verify(decision)
+                await self._verify(decision, iteration)
                 if self.score >= self.cfg.eval_pass_threshold or not self.cfg.enable_reflection:
                     break
                 await self._reflect()
@@ -469,7 +469,7 @@ class _AgentRun:
     # ------------------------------------------------------------------
     # Phase: verify
     # ------------------------------------------------------------------
-    async def _verify(self, decision: PlanDecision) -> None:
+    async def _verify(self, decision: PlanDecision, iteration: int) -> None:
         pack = self.current_pack
         verification = score_answer_details(
             self.user_input,
@@ -490,9 +490,13 @@ class _AgentRun:
                 self.answer,
                 pack.grounding_context,
             )
-        self._apply_verification(decision, verification)
+        self._apply_verification(decision, verification, iteration)
+        self._log_verification(decision, verification, iteration)
 
-    def _apply_verification(self, decision: PlanDecision, verification: dict[str, Any]) -> None:
+    def _apply_verification(
+        self, decision: PlanDecision, verification: dict[str, Any], iteration: int,
+    ) -> None:
+        """Pure business-logic side of verification: update scores and state."""
         self.score = float(verification["score"])
         if self.initial_score_value is None:
             self.initial_score_value = self.score
@@ -509,6 +513,10 @@ class _AgentRun:
         verification["reflection_delta"] = reflection_delta
         self.verification = verification
 
+    def _log_verification(
+        self, decision: PlanDecision, verification: dict[str, Any], iteration: int,
+    ) -> None:
+        """Observability side of verification: emit trace event + RL transition."""
         pack = self.current_pack
         self.traces.log(
             TraceEvent(
@@ -522,8 +530,8 @@ class _AgentRun:
                     "prompt_version": self.cfg.prompt_version,
                     "context_ids": pack.included_ids,
                     "verifier_score": self.score,
-                    "reflection_delta": reflection_delta,
-                    "verifier_disagreement": verifier_disagreement,
+                    "reflection_delta": verification.get("reflection_delta"),
+                    "verifier_disagreement": verification.get("verifier_disagreement", False),
                 },
             )
         )
@@ -532,7 +540,7 @@ class _AgentRun:
                 run_id=self.run_id,
                 step=self._next_transition(),
                 stage="verify",
-                state=self._current_state(iteration=len(self.prior_decisions)),
+                state=self._current_state(iteration=iteration),
                 action={
                     "type": "answer",
                     "answer": self.answer[:400],

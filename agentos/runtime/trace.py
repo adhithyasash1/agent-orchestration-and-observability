@@ -144,6 +144,7 @@ class TraceStore:
         self.db_path = db_path
         self.config = config
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._persistent_conn: sqlite3.Connection | None = None
         with self._conn() as c:
             c.executescript(SCHEMA)
             self._ensure_column(c, "runs", "prompt_version", "TEXT")
@@ -151,10 +152,20 @@ class TraceStore:
             self._ensure_column(c, "trace_events", "attributes", "TEXT")
         self._otel = _OTelBridge(config)
 
-    def _conn(self):
-        c = sqlite3.connect(self.db_path)
-        c.row_factory = sqlite3.Row
-        return c
+    def _conn(self) -> sqlite3.Connection:
+        if self._persistent_conn is None:
+            c = sqlite3.connect(self.db_path, check_same_thread=False)
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA synchronous=NORMAL")
+            self._persistent_conn = c
+        return self._persistent_conn
+
+    def close(self) -> None:
+        """Explicitly close the persistent connection."""
+        if self._persistent_conn is not None:
+            self._persistent_conn.close()
+            self._persistent_conn = None
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
         cols = {
