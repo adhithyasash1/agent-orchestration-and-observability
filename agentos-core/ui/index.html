@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>agentos-core</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; --fg: #e5e7eb; --muted:#9ca3af; --bg:#0b1020; --panel:#121731; --border:#1f2544; --accent:#60a5fa; --ok:#34d399; --err:#f87171; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; background: var(--bg); color: var(--fg); }
+  header { padding: 18px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; }
+  header h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: .2px; }
+  header .tag { font-size: 11px; color: var(--muted); padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 24px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  section h2 { margin: 0 0 10px; font-size: 13px; letter-spacing: .4px; color: var(--muted); text-transform: uppercase; }
+  input, button, textarea { font: inherit; color: inherit; }
+  textarea { width: 100%; background: #0b1228; border: 1px solid var(--border); color: var(--fg); border-radius: 8px; padding: 10px; resize: vertical; min-height: 70px; }
+  button { background: var(--accent); border: none; color: #0b1020; padding: 8px 14px; border-radius: 8px; font-weight: 600; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--border); }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .muted { color: var(--muted); }
+  .ok { color: var(--ok); }
+  .err { color: var(--err); }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); font-size: 11px; margin-right: 6px; }
+  .run { border-top: 1px dashed var(--border); padding: 8px 0; font-size: 13px; }
+  .run:first-child { border-top: none; }
+  .run .meta { font-size: 11px; color: var(--muted); }
+  .events { max-height: 420px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .event { padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+  .kind { display: inline-block; width: 86px; color: var(--accent); }
+  details > summary { cursor: pointer; list-style: none; }
+  code { background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px; }
+  pre { background: #0b1228; padding: 8px; border-radius: 6px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>agentos-core</h1>
+  <span id="status" class="tag">connecting…</span>
+  <span id="profile" class="tag"></span>
+  <span class="muted" style="margin-left:auto">local-first agent runtime</span>
+</header>
+
+<main>
+  <section>
+    <h2>New run</h2>
+    <textarea id="input" placeholder="Ask anything, e.g. 'What is the capital of France?' or 'Calculate 12 * 11'"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button id="submit">Run</button>
+      <span id="last-status" class="muted"></span>
+    </div>
+    <div id="answer" style="margin-top:12px"></div>
+  </section>
+
+  <section>
+    <h2>Runs</h2>
+    <div id="runs"></div>
+  </section>
+
+  <section style="grid-column: 1 / -1">
+    <h2>Trace</h2>
+    <div id="trace" class="muted">Select a run to see its trace events.</div>
+  </section>
+</main>
+
+<script>
+const API = "/api/v1";
+const $ = (id) => document.getElementById(id);
+
+async function refreshHealth() {
+  try {
+    const r = await fetch(`${API}/health`); const h = await r.json();
+    $("status").textContent = h.status; $("status").className = "tag " + (h.status === "ok" ? "ok" : "err");
+    $("profile").textContent = `profile: ${h.config.profile} · llm: ${h.config.llm_backend}`;
+  } catch (e) { $("status").textContent = "offline"; }
+}
+
+async function refreshRuns() {
+  const r = await fetch(`${API}/runs?limit=20`); const runs = await r.json();
+  const el = $("runs"); el.innerHTML = "";
+  if (!runs.length) { el.innerHTML = '<div class="muted">No runs yet.</div>'; return; }
+  for (const run of runs) {
+    const d = document.createElement("div"); d.className = "run";
+    const score = run.score == null ? "–" : Number(run.score).toFixed(2);
+    d.innerHTML = `
+      <div>${escapeHtml(run.user_input || "").slice(0,120)}</div>
+      <div class="meta">
+        <span class="pill">${run.status || "?"}</span>
+        <span class="pill">score ${score}</span>
+        <span class="pill">${run.total_latency_ms ?? 0} ms</span>
+        <a href="#" data-run="${run.run_id}">view trace</a>
+      </div>`;
+    d.querySelector("a").addEventListener("click", (e) => { e.preventDefault(); showTrace(run.run_id); });
+    el.appendChild(d);
+  }
+}
+
+async function showTrace(runId) {
+  const r = await fetch(`${API}/runs/${runId}`); const run = await r.json();
+  const el = $("trace"); el.className = "";
+  const eventsHtml = run.events.map(ev => `
+    <div class="event">
+      <span class="kind">[${ev.kind}]</span>
+      <strong>${escapeHtml(ev.name || "")}</strong>
+      ${ev.latency_ms != null ? `<span class="muted">· ${ev.latency_ms}ms</span>` : ""}
+      ${ev.error ? `<span class="err">· ${escapeHtml(ev.error)}</span>` : ""}
+      ${ev.input ? `<details><summary class="muted">input</summary><pre>${escapeHtml(String(ev.input))}</pre></details>` : ""}
+      ${ev.output ? `<details><summary class="muted">output</summary><pre>${escapeHtml(String(ev.output))}</pre></details>` : ""}
+    </div>`).join("");
+  el.innerHTML = `
+    <div><strong>${escapeHtml(run.user_input)}</strong></div>
+    <div class="muted" style="margin-bottom:8px">run ${run.run_id} · score ${Number(run.score||0).toFixed(2)} · ${run.events.length} events</div>
+    <div class="events">${eventsHtml}</div>
+    <details style="margin-top:8px"><summary class="muted">final answer</summary><pre>${escapeHtml(run.final_output||"")}</pre></details>`;
+}
+
+$("submit").addEventListener("click", async () => {
+  const input = $("input").value.trim(); if (!input) return;
+  $("last-status").textContent = "running…"; $("answer").textContent = "";
+  try {
+    const r = await fetch(`${API}/runs`, { method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({input}) });
+    const data = await r.json();
+    $("last-status").textContent = `done · ${data.status} · score ${Number(data.score).toFixed(2)} · ${data.latency_ms} ms`;
+    $("answer").innerHTML = `<pre>${escapeHtml(data.answer || "(no answer)")}</pre>`;
+    await refreshRuns();
+    if (data.run_id) showTrace(data.run_id);
+  } catch (e) {
+    $("last-status").innerHTML = `<span class="err">error: ${escapeHtml(String(e))}</span>`;
+  }
+});
+
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
+
+refreshHealth(); refreshRuns(); setInterval(refreshHealth, 10000);
+</script>
+</body>
+</html>
