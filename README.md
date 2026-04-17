@@ -4,9 +4,8 @@ A **local-first orchestration and observability layer** for agentic workflows.
 
 agentos-core accepts a user request, retrieves tiered memory, packs context,
 plans a next step, calls tools, verifies the result, and logs every step as
-both a `trace_event` and a **structured run log with reward annotation**
-(stored in the `rl_transitions` table — see [Logging & observability](#logging--observability)
-for what this is and isn't). All on one machine, in one process, using
+both a `trace_event` and a **structured run log with score annotation**
+(stored in the `run_transitions` table). All on one machine, in one process, using
 SQLite as the default store.
 
 It is not a general AGI. It is a small, honest runtime you can read in an
@@ -25,8 +24,8 @@ agentos-core flips that:
 
 - **local by default**: SQLite only; no Neo4j / Chroma / Qdrant needed
 - **observable by default**: every phase of every run is a row in
-  `trace_events`; every decision also emits a reward-annotated row in
-  `rl_transitions`
+  `trace_events`; every decision also emits a score-annotated row in
+  `run_transitions`
 - **testable by default**: a deterministic mock LLM runs the whole loop
   without a network
 - **measurable by default**: one `python -m bench.runner --all-ablations`
@@ -191,7 +190,7 @@ The suite covers:
 - **memory**: tiered storage, salience filters, verified promotion, TTL edge cases
 - **tools**: calculator, flag gating, unknown tool handling, unsafe input
 - **scorer**: expected-match, grounding heuristic, LLM-judge happy path, judge error fallbacks, trustworthy gate
-- **trace**: run lifecycle, event listing, rl_transitions persistence
+- **trace**: run lifecycle, event listing, run_transitions persistence
 - **loop**: happy path, tool path, empty-input rejection, planner schema,
   durable-memory promotion (positive + negative), trace completeness
 - **api**: health, runs create/list/get, memory search, config patch
@@ -290,8 +289,8 @@ Every run produces a complete trace:
 GET /api/v1/runs/{run_id}
 ```
 
-Returns the run row plus ordered `trace_events` and reward-annotated run
-log rows from `rl_transitions`.
+Returns the run row plus ordered `trace_events` and score-annotated run
+log rows from `run_transitions`.
 
 Each `trace_event` carries:
 
@@ -301,21 +300,21 @@ Each `trace_event` carries:
 - `latency_ms`, `tokens_in`, `tokens_out` (best-effort)
 - `error` — populated if the step failed
 
-Each row in `rl_transitions` carries `(state, action, observation,
-reward)` plus metadata: `prompt_version`, `context_ids`,
+Each row in `run_transitions` carries `(state, action, observation,
+score)` plus metadata: `prompt_version`, `context_ids`,
 `retrieval_candidates`, `tool_latency_ms`, `verifier_score`,
 `reflection_delta`, optional `user_feedback`.
 
-### Honest framing: what `rl_transitions` is and isn't
+### What `run_transitions` is and isn't
 
 The schema was chosen to make these rows easy to replay for future
 offline RL work, but **no training loop consumes them today**. There is
 no replay buffer, no policy update, no behavior change informed by past
-rewards. `reflection_roi` is computed for visibility but nothing feeds
+scores. `reflection_roi` is computed for visibility but nothing feeds
 it back into planner behavior on the next run.
 
-In practice, `rl_transitions` is **structured per-step run logs with
-reward annotation** — useful as an audit trail, a dataset for future
+In practice, `run_transitions` is **structured per-step run logs with
+score annotation** — useful as an audit trail, a dataset for future
 offline training, or an input to a dashboard. It is not reinforcement
 learning.
 
@@ -374,8 +373,7 @@ fields; prefer the console for day-to-day use.
 - **No multi-agent orchestration.** One loop, one agent.
 - **Trace payloads are truncated at 8 KB** to keep SQLite fast; full
   payloads are not preserved.
-- **`rl_transitions` is not RL.** It's reward-annotated run logs. See
-  [Logging & observability](#logging--observability).
+- **`run_transitions` is not RL.** It's score-annotated run logs.
 - **Context packer budgets** (`0.18 / 0.16 / 0.28` splits between
   developer prompt, scratchpad, and tools) are hand-tuned, not
   empirically validated via the ablation framework. If you care about

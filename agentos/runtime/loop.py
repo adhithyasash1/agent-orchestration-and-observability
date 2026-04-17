@@ -35,7 +35,7 @@ from ..memory.store import MemoryStore
 from ..tools.registry import ToolRegistry
 from .context_packer import PackedContext, pack_context
 from .planner import PlanDecision, plan_next_step
-from .trace import RLTransition, TraceEvent, TraceStore, Timer
+from .trace import RunTransition, TraceEvent, TraceStore, Timer
 
 
 @dataclass
@@ -54,7 +54,7 @@ class AgentResult:
     retrieval_candidates: list[str] = field(default_factory=list)
     reflection_count: int = 0
     reflection_roi: float = 0.0
-    rl_transition_count: int = 0
+    run_transition_count: int = 0
     prompt_version: str = ""
     verification: dict[str, Any] = field(default_factory=dict)
     initial_score: float = 0.0
@@ -155,7 +155,11 @@ class _AgentRun:
                     continue
                 await self._produce_answer(decision)
                 await self._verify(decision, iteration)
-                if self.score >= self.cfg.eval_pass_threshold or not self.cfg.enable_reflection:
+                if (
+                    self.score >= self.cfg.eval_pass_threshold 
+                    or not self.cfg.enable_reflection
+                    or not self.cfg.enable_llm_judge
+                ):
                     break
                 await self._reflect()
 
@@ -225,14 +229,14 @@ class _AgentRun:
             )
         )
         self.traces.log_transition(
-            RLTransition(
+            RunTransition(
                 run_id=self.run_id,
                 step=self._next_transition(),
                 stage="reject",
                 state={"user_input": self.user_input},
                 action={"type": "reject", "reason": "empty input"},
                 observation={"error": "empty input"},
-                reward=0.0,
+                score=0.0,
                 done=True,
                 status="rejected",
                 attributes={"prompt_version": self.cfg.prompt_version},
@@ -247,7 +251,7 @@ class _AgentRun:
             status="rejected",
             error="empty input",
             prompt_version=self.cfg.prompt_version,
-            rl_transition_count=self._transition_step,
+            run_transition_count=self._transition_step,
         )
 
     # ------------------------------------------------------------------
@@ -360,14 +364,14 @@ class _AgentRun:
             )
         )
         self.traces.log_transition(
-            RLTransition(
+            RunTransition(
                 run_id=self.run_id,
                 step=self._next_transition(),
                 stage="plan",
                 state=self._current_state(iteration),
                 action=decision.as_dict(),
                 observation={"packed_context": pack.summary()},
-                reward=None,
+                score=None,
                 done=False,
                 status="planned",
                 attributes={
@@ -386,7 +390,11 @@ class _AgentRun:
             return False
 
         with Timer() as t:
-            result = await self.tools.call(decision.tool, decision.tool_args or {})
+            result = await self.tools.call(
+                decision.tool, 
+                decision.tool_args or {},
+                context={"memory": self.memory, "config": self.cfg}
+            )
         self.total_latency += t.ms
 
         tool_result = {
@@ -434,14 +442,14 @@ class _AgentRun:
             )
         )
         self.traces.log_transition(
-            RLTransition(
+            RunTransition(
                 run_id=self.run_id,
                 step=self._next_transition(),
                 stage="tool_result",
                 state=self._current_state(iteration),
                 action={"tool": decision.tool, "tool_args": decision.tool_args},
                 observation=result,
-                reward=0.1 if result["status"] == "ok" else -0.1,
+                score=0.1 if result["status"] == "ok" else -0.1,
                 done=False,
                 status=result["status"],
                 attributes={
@@ -536,7 +544,7 @@ class _AgentRun:
             )
         )
         self.traces.log_transition(
-            RLTransition(
+            RunTransition(
                 run_id=self.run_id,
                 step=self._next_transition(),
                 stage="verify",
@@ -547,7 +555,7 @@ class _AgentRun:
                     "confidence": decision.confidence,
                 },
                 observation=verification,
-                reward=self.score,
+                score=self.score,
                 done=self.score >= self.cfg.eval_pass_threshold,
                 status="pass" if self.score >= self.cfg.eval_pass_threshold else "retry",
                 attributes={
@@ -590,7 +598,7 @@ class _AgentRun:
             )
         )
         self.traces.log_transition(
-            RLTransition(
+            RunTransition(
                 run_id=self.run_id,
                 step=self._next_transition(),
                 stage="reflection",
@@ -601,7 +609,7 @@ class _AgentRun:
                 },
                 action={"retry": True, "reason": "score_below_threshold"},
                 observation={"next_iteration": len(self.prior_decisions) + 1},
-                reward=0.0,
+                score=0.0,
                 done=False,
                 status="retry",
                 attributes={"prompt_version": self.cfg.prompt_version},
@@ -660,14 +668,14 @@ class _AgentRun:
             )
         )
         self.traces.log_transition(
-            RLTransition(
+            RunTransition(
                 run_id=self.run_id,
                 step=self._next_transition(),
                 stage="final",
                 state={"user_input": self.user_input},
                 action={"type": "finalize"},
                 observation={"answer": self.answer[:400], "score": self.score},
-                reward=self.score,
+                score=self.score,
                 done=True,
                 status="ok",
                 attributes={"prompt_version": self.cfg.prompt_version},
@@ -702,7 +710,7 @@ class _AgentRun:
             retrieval_candidates=final_pack.retrieval_candidates,
             reflection_count=self.reflection_count,
             reflection_roi=round(self.reflection_gain, 4),
-            rl_transition_count=self._transition_step,
+            run_transition_count=self._transition_step,
             prompt_version=self.cfg.prompt_version,
             verification=self.verification,
             initial_score=self.initial_score_value or 0.0,
@@ -720,14 +728,14 @@ class _AgentRun:
             )
         )
         self.traces.log_transition(
-            RLTransition(
+            RunTransition(
                 run_id=self.run_id,
                 step=self._next_transition(),
                 stage="error",
                 state={"user_input": self.user_input},
                 action={"type": "error"},
                 observation={"error": str(exc)},
-                reward=-1.0,
+                score=-1.0,
                 done=True,
                 status="error",
                 attributes={"prompt_version": self.cfg.prompt_version},
@@ -750,7 +758,7 @@ class _AgentRun:
             error=str(exc),
             memory_hits=self.memory_hits,
             prompt_version=self.cfg.prompt_version,
-            rl_transition_count=self._transition_step,
+            run_transition_count=self._transition_step,
             verification=self.verification,
             initial_score=self.initial_score_value or 0.0,
         )

@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     # Optional integrations
     enable_http_fetch: bool = True
     enable_tavily: bool = False
+    enable_mcp_plugins: bool = True
     tavily_api_key: str = ""
     otel_service_name: str = "agentos-core"
     otel_exporter_otlp_endpoint: str = ""
@@ -57,7 +58,7 @@ class Settings(BaseSettings):
     # Agent loop
     max_steps: int = 4
     eval_pass_threshold: float = 0.6
-    context_char_budget: int = 8000
+    context_char_budget: int = 150000
     memory_search_k: int = 8
     memory_min_salience: float = 0.15
     working_memory_ttl_seconds: int = 3600
@@ -119,6 +120,7 @@ class Settings(BaseSettings):
                 "llm_judge": self.enable_llm_judge,
                 "http_fetch": self.enable_http_fetch,
                 "tavily": self.enable_tavily,
+                "mcp_plugins": self.enable_mcp_plugins,
                 "otel": self.enable_otel,
             },
         }

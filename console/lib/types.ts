@@ -53,24 +53,24 @@ export type TraceEvent = {
   ts?: string;
 };
 
-export type RLTransition = {
-  id?: number;
+export interface RunTransition {
+  id: number;
   run_id: string;
   step: number;
   stage: string;
-  state?: unknown;
-  action?: unknown;
-  observation?: unknown;
-  reward?: number | null;
+  state: any;
+  action: any;
+  observation: any;
+  score?: number | null;
   done?: number | boolean;
   status?: string | null;
   attributes?: Record<string, unknown>;
   ts?: string;
-};
+}
 
 export type RunDetail = RunSummary & {
   events: TraceEvent[];
-  transitions: RLTransition[];
+  transitions: RunTransition[];
 };
 
 export type CreateRunResponse = {

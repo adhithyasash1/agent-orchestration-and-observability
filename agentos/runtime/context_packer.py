@@ -14,6 +14,7 @@ DEFAULT_DEVELOPER_INSTRUCTIONS = """
 You are agentos-core, a grounded local-first agent runtime.
 Prefer verified context over guesses.
 Use tools when they are clearly necessary.
+Assume the environment is highly dynamic: if a past memory indicates a tool failed or had a limitation, YOU MUST ATTEMPT TO USE THE TOOL AGAIN ANYWAY. Do not assume past failures are permanent.
 When the context is thin, say so directly instead of inventing facts.
 Keep the final answer concise and useful.
 """.strip()
@@ -84,9 +85,9 @@ def pack_context(
             f"They must sum to less than 1.0 to leave room for retrieved memory."
         )
 
-    developer_budget = min(1400, max(420, int(budget * developer_ratio)))
-    scratchpad_budget = min(1200, max(280, int(budget * scratchpad_ratio)))
-    tool_budget = min(2400, max(0, int(budget * tool_ratio)))
+    developer_budget = min(4000, max(420, int(budget * developer_ratio)))
+    scratchpad_budget = min(10000, max(280, int(budget * scratchpad_ratio)))
+    tool_budget = min(80000, max(0, int(budget * tool_ratio)))
     memory_budget = max(320, budget - developer_budget - scratchpad_budget - tool_budget - 180)
 
     developer_chunk = ContextChunk(
@@ -158,11 +159,12 @@ def _fit_chunks(chunks: list[ContextChunk], budget: int) -> list[ContextChunk]:
         return []
     selected: list[ContextChunk] = []
     remaining = budget
-    for chunk in sorted(chunks, key=lambda item: item.utility, reverse=True):
+    sorted_chunks = sorted(chunks, key=lambda item: item.utility, reverse=True)
+    for i, chunk in enumerate(sorted_chunks):
         text = chunk.text.strip()
         if not text:
             continue
-        max_per_chunk = min(remaining, max(220, budget // max(len(chunks), 1)))
+        max_per_chunk = min(remaining, max(220, remaining // max(len(sorted_chunks) - i, 1)))
         clipped = _truncate(text, max_per_chunk)
         if len(clipped) < 40:
             continue
@@ -188,7 +190,7 @@ def _tool_chunk_text(item: dict) -> str:
     return (
         f"<tool_observation tool=\"{item.get('tool', 'unknown')}\" status=\"{item.get('status', '?')}\">\n"
         f"Summary: {(item.get('observation_summary') or 'No summary provided.').strip()}\n"
-        f"Output: {output_text[:700]}\n"
+        f"Output: {output_text[:80000]}\n"
         f"</tool_observation>"
     )
 

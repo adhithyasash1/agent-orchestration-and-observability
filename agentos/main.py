@@ -7,11 +7,14 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 
 from .api import api_router, build_components
 from .config import settings
+
+import os
+from fastapi.staticfiles import StaticFiles
+
+os.makedirs("data/exports", exist_ok=True)
 
 
 logging.basicConfig(
@@ -35,26 +38,19 @@ app = FastAPI(title="agentos-core", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(api_router, prefix=settings.api_prefix)
 
-
-# --- minimal static dashboard at / ---
-_ui_dir = Path(__file__).resolve().parent.parent / "ui"
-if _ui_dir.exists():
-    app.mount("/ui", StaticFiles(directory=_ui_dir), name="ui")
+app.mount("/static", StaticFiles(directory="data/exports"), name="static")
 
 
 @app.get("/")
 async def root():
-    index = _ui_dir / "index.html"
-    if index.exists():
-        return FileResponse(index)
     return {"name": "agentos-core", "docs": "/docs", "api": settings.api_prefix}
 
 

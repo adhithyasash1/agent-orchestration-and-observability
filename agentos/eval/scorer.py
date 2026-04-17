@@ -28,9 +28,12 @@ REFUSAL_PHRASES = (
     "i cannot",
     "i'm unable",
     "i was unable",
+    "unable to",
     "i do not have",
     "i encountered an error",
     "i don't have enough information",
+    "cannot provide accurate",
+    "please retry",
 )
 
 
@@ -189,6 +192,9 @@ async def llm_judge(
         details["judge_raw"] = (raw or "")[:240]
         return details
 
+    norm = _norm(answer)
+    refusal_detected = any(p in norm for p in REFUSAL_PHRASES)
+
     correct = _clamp_unit(parsed.get("correct"))
     grounded = _clamp_unit(parsed.get("grounded"))
     score = round(0.7 * correct + 0.3 * grounded, 4)
@@ -199,10 +205,10 @@ async def llm_judge(
         "judge_grounded": grounded,
         "judge_reason": str(parsed.get("reason", ""))[:300],
         "grounding_overlap": 0.0,
-        "refusal_detected": False,
+        "refusal_detected": refusal_detected,
         # Only trust the judge when both sub-scores agree the answer is
-        # at least passable. Otherwise don't promote.
-        "trustworthy": correct >= 0.7 and grounded >= 0.5,
+        # at least passable. Otherwise don't promote. Block if it's a known refusal.
+        "trustworthy": (correct >= 0.7 and grounded >= 0.5) and not refusal_detected,
     }
 
 

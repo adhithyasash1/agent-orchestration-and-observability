@@ -13,7 +13,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi.concurrency import asynccontextmanager
+from pydantic import BaseModel, Field, field_validator
+import re
 
 from ..config import Settings
 from ..llm import build_llm
@@ -50,12 +52,22 @@ def get_components(request: Request) -> Components:
 
 
 _config_lock = asyncio.Lock()
+_run_semaphore = asyncio.Semaphore(10)
 
 api_router = APIRouter()
 
 
 class RunRequest(BaseModel):
     input: str = Field(..., min_length=1, max_length=4000)
+
+    @field_validator("input")
+    def sanitize_input(cls, v: str) -> str:
+        v = v.strip()
+        # strip purely non-printable characters 
+        v = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', v)
+        if not v:
+            raise ValueError("input cannot be empty after sanitization")
+        return v
 
 
 class ConfigPatch(BaseModel):
@@ -91,14 +103,23 @@ class RunFeedbackRequest(BaseModel):
 
 @api_router.post("/runs")
 async def create_run(req: RunRequest, c: Components = Depends(get_components)):
-    result = await run_agent(
-        req.input,
-        llm=c.llm,
-        tools=c.tools,
-        memory=c.memory,
-        traces=c.traces,
-        config=c.settings,
-    )
+    try:
+        await asyncio.wait_for(_run_semaphore.acquire(), timeout=0.1)
+    except asyncio.TimeoutError:
+        raise HTTPException(429, "too many concurrent runs")
+    
+    try:
+        result = await run_agent(
+            req.input,
+            llm=c.llm,
+            tools=c.tools,
+            memory=c.memory,
+            traces=c.traces,
+            config=c.settings,
+        )
+    finally:
+        _run_semaphore.release()
+        
     return {
         "run_id": result.run_id,
         "answer": result.answer,
@@ -113,7 +134,7 @@ async def create_run(req: RunRequest, c: Components = Depends(get_components)):
         "retrieval_candidates": result.retrieval_candidates,
         "reflection_count": result.reflection_count,
         "reflection_roi": result.reflection_roi,
-        "rl_transition_count": result.rl_transition_count,
+        "run_transition_count": result.run_transition_count,
         "prompt_version": result.prompt_version,
         "verification": result.verification,
         "initial_score": result.initial_score,

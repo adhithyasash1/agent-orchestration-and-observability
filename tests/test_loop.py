@@ -22,7 +22,7 @@ async def test_loop_uses_calculator(llm, tools, memory, traces, settings):
     )
     assert result.status == "ok"
     assert any(tc["tool"] == "calculator" for tc in result.tool_calls)
-    assert result.rl_transition_count > 0
+    assert result.run_transition_count > 0
 
 
 async def test_loop_rejects_empty_input(llm, tools, memory, traces, settings):

@@ -47,8 +47,10 @@ def test_run_and_fetch(client):
     r = client.post("/api/v1/runs", json={"input": "What is the capital of France?"})
     assert r.status_code == 200
     data = r.json()
-    assert data["status"] == "ok"
-    assert "context_ids" in data
+    assert "run_id" in data
+    assert data["answer"] == "Paris."
+    assert data["run_transition_count"] > 0
+    assert data["score"] == 1.0
     run_id = data["run_id"]
 
     r2 = client.get(f"/api/v1/runs/{run_id}")
@@ -93,9 +95,23 @@ def test_config_patch(client):
 
 
 def test_config_patch_empty_is_noop(client):
-    r = client.post("/api/v1/config", json={})
-    assert r.status_code == 200
-    assert r.json()["updated"] == {}
+    patch_resp = client.patch(
+        "/api/v1/config",
+        json={"flags": {"AGENTOS_ENABLE_MEMORY": True}},
+    )
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["flags"]["AGENTOS_ENABLE_MEMORY"] is True
+
+
+def test_settings_budget_validation():
+    from agentos.config import Settings
+    import pytest
+    with pytest.raises(ValueError, match="must sum to less than 1.0"):
+        Settings(
+            context_developer_ratio=0.5,
+            context_scratchpad_ratio=0.5,
+            context_tool_ratio=0.1
+        ).apply_profile()
 
 
 def test_feedback_endpoint(client):

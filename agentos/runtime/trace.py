@@ -1,8 +1,9 @@
-"""SQLite-backed trace and RL transition store."""
+"""SQLite-backed trace and step log store."""
 from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -45,7 +46,7 @@ CREATE TABLE IF NOT EXISTS trace_events (
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
 );
 
-CREATE TABLE IF NOT EXISTS rl_transitions (
+CREATE TABLE IF NOT EXISTS run_transitions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT NOT NULL,
     step INTEGER NOT NULL,
@@ -53,7 +54,7 @@ CREATE TABLE IF NOT EXISTS rl_transitions (
     state TEXT,
     action TEXT,
     observation TEXT,
-    reward REAL,
+    score REAL,
     done INTEGER DEFAULT 0,
     status TEXT,
     attributes TEXT,
@@ -62,7 +63,7 @@ CREATE TABLE IF NOT EXISTS rl_transitions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_run ON trace_events(run_id, step);
-CREATE INDEX IF NOT EXISTS idx_rl_run ON rl_transitions(run_id, step);
+CREATE INDEX IF NOT EXISTS idx_transitions_run ON run_transitions(run_id, step);
 """
 
 
@@ -99,14 +100,14 @@ class TraceEvent:
 
 
 @dataclass
-class RLTransition:
+class RunTransition:
     run_id: str
     step: int
     stage: str
     state: Any = None
     action: Any = None
     observation: Any = None
-    reward: float | None = None
+    score: float | None = None
     done: bool = False
     status: str | None = None
     attributes: dict[str, Any] | None = None
@@ -120,7 +121,7 @@ class RLTransition:
             _dumps(self.state),
             _dumps(self.action),
             _dumps(self.observation),
-            self.reward,
+            self.score,
             1 if self.done else 0,
             self.status,
             _dumps(self.attributes),
@@ -139,33 +140,41 @@ def _dumps(v: Any) -> str | None:
         return str(v)[:12000]
 
 
+_initialized_dbs: set[str] = set()
+
+
 class TraceStore:
     def __init__(self, db_path: str, config: Any | None = None):
         self.db_path = db_path
         self.config = config
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._persistent_conn: sqlite3.Connection | None = None
-        with self._conn() as c:
-            c.executescript(SCHEMA)
-            self._ensure_column(c, "runs", "prompt_version", "TEXT")
-            self._ensure_column(c, "runs", "user_feedback", "TEXT")
-            self._ensure_column(c, "trace_events", "attributes", "TEXT")
+        self._local = threading.local()
+        
+        global _initialized_dbs
+        if db_path not in _initialized_dbs:
+            with self._conn() as c:
+                c.executescript(SCHEMA)
+                self._ensure_column(c, "runs", "prompt_version", "TEXT")
+                self._ensure_column(c, "runs", "user_feedback", "TEXT")
+                self._ensure_column(c, "trace_events", "attributes", "TEXT")
+            _initialized_dbs.add(db_path)
+            
         self._otel = _OTelBridge(config)
 
     def _conn(self) -> sqlite3.Connection:
-        if self._persistent_conn is None:
-            c = sqlite3.connect(self.db_path, check_same_thread=False)
+        if not hasattr(self._local, "conn") or self._local.conn is None:
+            c = sqlite3.connect(self.db_path)
             c.row_factory = sqlite3.Row
             c.execute("PRAGMA journal_mode=WAL")
             c.execute("PRAGMA synchronous=NORMAL")
-            self._persistent_conn = c
-        return self._persistent_conn
+            self._local.conn = c
+        return self._local.conn
 
     def close(self) -> None:
         """Explicitly close the persistent connection."""
-        if self._persistent_conn is not None:
-            self._persistent_conn.close()
-            self._persistent_conn = None
+        if hasattr(self._local, "conn") and self._local.conn is not None:
+            self._local.conn.close()
+            self._local.conn = None
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
         cols = {
@@ -223,11 +232,11 @@ class TraceStore:
             )
         self._otel.log_event(event)
 
-    def log_transition(self, transition: RLTransition) -> None:
+    def log_transition(self, transition: RunTransition) -> None:
         with self._conn() as c:
             c.execute(
-                """INSERT INTO rl_transitions
-                   (run_id, step, stage, state, action, observation, reward,
+                """INSERT INTO run_transitions
+                   (run_id, step, stage, state, action, observation, score,
                     done, status, attributes, ts)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 transition.to_row(),
@@ -258,7 +267,7 @@ class TraceStore:
                 (run_id,),
             ).fetchall()
             transitions = c.execute(
-                "SELECT * FROM rl_transitions WHERE run_id=? ORDER BY step, id",
+                "SELECT * FROM run_transitions WHERE run_id=? ORDER BY step, id",
                 (run_id,),
             ).fetchall()
         data = dict(run)

@@ -1,35 +1,28 @@
 """Tool registry.
 
-A Tool is a small async callable with a name, description, and argument
-schema. The registry decides which tools are available at runtime based on
-feature flags.
-
-Every tool returns a dict:
-  {"status": "ok" | "error", "output": <any>, "error": <str|None>}
-
-This makes the loop's error-recovery logic uniform.
+Dynamically mounts tools tagged with `@tool`, handles contextual filtering based
+on profiles, and implements Circuit Breaker fallback logic.
 """
 from __future__ import annotations
 
-import asyncio
+import importlib
 import inspect
-from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+import pkgutil
+import time
+from collections import defaultdict
+from typing import Any
 
-ToolFn = Callable[[dict], Awaitable[dict]]
-
-
-@dataclass
-class Tool:
-    name: str
-    description: str
-    args_schema: dict  # {arg_name: "type description"}
-    fn: ToolFn
+from .core import Tool, _REGISTERED_TOOLS
 
 
 class ToolRegistry:
-    def __init__(self):
+    def __init__(self, profile: str):
+        self.profile = profile
         self._tools: dict[str, Tool] = {}
+        
+        # Circuit Breaker state
+        self._failures: dict[str, int] = defaultdict(int)
+        self._disabled_until: dict[str, float] = {}
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
@@ -49,40 +42,72 @@ class ToolRegistry:
             out.append(f"- {t.name}({args}) — {t.description}")
         return "\n".join(out)
 
-    async def call(self, name: str, args: dict) -> dict:
+    async def call(self, name: str, args: dict, context: dict | None = None) -> dict:
         tool = self._tools.get(name)
         if not tool:
             return {"status": "error", "output": None,
                     "error": f"unknown tool: {name}"}
-        try:
-            if inspect.iscoroutinefunction(tool.fn):
-                result = await tool.fn(args or {})
+                    
+        # Circuit Breaker Check
+        if name in self._disabled_until:
+            if time.time() < self._disabled_until[name]:
+                return {
+                    "status": "error",
+                    "output": None,
+                    "error": f"Circuit breaker tripped. Tool '{name}' is temporarily disabled due to overwhelming errors."
+                }
             else:
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None, tool.fn, args or {}
-                )
-            if not isinstance(result, dict) or "status" not in result:
-                result = {"status": "ok", "output": result}
-            return result
-        except Exception as e:
-            return {"status": "error", "output": None, "error": str(e)}
+                del self._disabled_until[name]
+                self._failures[name] = 0
+
+        # Execute Tool
+        result = await tool.fn(args or {}, context or {})
+        
+        # Adjust Circuit Breaker
+        if result.get("status") == "error":
+            self._failures[name] += 1
+            if self._failures[name] >= 3:
+                self._disabled_until[name] = time.time() + 300  # 5 minutes
+        else:
+            self._failures[name] = 0
+
+        return result
 
 
 def build_default_registry(settings) -> ToolRegistry:
-    """Assemble the registry based on feature flags."""
-    from .builtin import http_fetch_tool, calculator_tool, tavily_search_tool
-
-    reg = ToolRegistry()
+    """Assemble the registry dynamically based on profiles and feature flags."""
+    reg = ToolRegistry(profile=settings.profile)
+    
     if not settings.enable_tools:
         return reg
 
-    # Calculator is always safe and useful
-    reg.register(calculator_tool())
+    # Core Auto-Discovery
+    _REGISTERED_TOOLS.clear()
+    
+    import agentos.tools.modules as modules_pkg
+    
+    # 1. Discover all modules in `agentos/tools/modules`
+    for _, module_name, _ in pkgutil.iter_modules(modules_pkg.__path__):
+        try:
+            importlib.import_module(f"agentos.tools.modules.{module_name}")
+        except Exception as e:
+            print(f"Warning: Failed to load module {module_name}: {e}")
+            
+    # 2. Register tools that match current profile
+    for t in _REGISTERED_TOOLS:
+        if settings.profile in t.profiles or "full" in t.profiles:
+            # Special toggle switches overriding profiles
+            if t.name == "http_fetch" and not settings.enable_http_fetch:
+                continue
+            if t.name == "tavily_search" and not (settings.enable_tavily and settings.tavily_api_key):
+                continue
+            
+            # Note: MCP Plugins are hot-loaded by mcp_loader.py, but they add to _REGISTERED_TOOLS.
+            # So if `enable_mcp_plugins` is false, we should block any tools from mcp_loader.
+            # But the loader itself handles that internally or we filter here:
+            if t.name.endswith("_mcp") and not getattr(settings, "enable_mcp_plugins", False):
+                continue
 
-    if settings.enable_http_fetch:
-        reg.register(http_fetch_tool())
-
-    if settings.enable_tavily and settings.tavily_api_key:
-        reg.register(tavily_search_tool(settings.tavily_api_key))
+            reg.register(t)
 
     return reg

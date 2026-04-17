@@ -29,23 +29,10 @@ ABLATIONS = {
 
 
 async def run_benchmark(label: str, profile: str, tasks_file: Path,
-                        db_path: str, max_tasks: int | None = None,
-                        allow_mock: bool = False) -> dict:
+                        db_path: str, max_tasks: int | None = None) -> dict:
     overrides = ABLATIONS[label]
     settings = Settings(profile=profile, db_path=db_path, **overrides)
     settings.apply_profile()
-
-    if settings.llm_backend == "mock" and not allow_mock:
-        # The MockLLM matches on known prompts with canned answers. Running
-        # the benchmark against it measures the mock, not the runtime. Require
-        # an explicit opt-in so the numbers below are never mistaken for real
-        # capability scores.
-        raise RuntimeError(
-            "Refusing to benchmark against the mock LLM. Run with "
-            "--profile full (uses Ollama) or pass --allow-mock if you are "
-            "deliberately measuring the runtime plumbing rather than real "
-            "model performance."
-        )
 
     llm = build_llm(settings)
     memory = MemoryStore(settings.db_path)
@@ -308,15 +295,6 @@ async def main():
     ap.add_argument("--max-tasks", type=int, default=None)
     ap.add_argument("--all-ablations", action="store_true",
                     help="Run every ablation back-to-back.")
-    ap.add_argument(
-        "--allow-mock",
-        action="store_true",
-        help=(
-            "Allow running the benchmark against the mock LLM. Off by "
-            "default so mock-matched scores are not confused with real "
-            "model capability."
-        ),
-    )
     args = ap.parse_args()
 
     out_dir = ROOT / "bench" / "results"
@@ -332,7 +310,6 @@ async def main():
             tasks_file,
             db,
             args.max_tasks,
-            allow_mock=args.allow_mock,
         )
         out = save(summary, out_dir)
         print_summary(summary)

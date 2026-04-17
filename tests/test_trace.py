@@ -1,4 +1,4 @@
-from agentos.runtime.trace import RLTransition, TraceEvent, TraceStore
+from agentos.runtime.trace import RunTransition, TraceEvent, TraceStore
 
 
 def test_start_and_finish_run(traces):
@@ -37,14 +37,14 @@ def test_list_runs(traces):
 def test_rl_transitions_are_returned_with_run(traces):
     run_id = traces.start_run("hello", "minimal", {}, prompt_version="rl-v1")
     traces.log_transition(
-        RLTransition(
+        RunTransition(
             run_id=run_id,
             step=1,
             stage="plan",
             state={"prompt": "hello"},
             action={"action": "answer"},
             observation={"packed": True},
-            reward=None,
+            score=None,
             done=False,
             status="planned",
             attributes={"context_ids": ["memory:1"]},
