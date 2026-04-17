@@ -68,33 +68,24 @@ For trajectories to enter `experience` memory, they must pass strict scoring thr
 
 ## Architecture
 
-```
-agentos/
-├── config.py             # pydantic-settings; profiles + feature flags
-├── main.py               # FastAPI entrypoint + lifespan + static UI mount
-├── runtime/
-│   ├── loop.py           # The phase-by-phase agent loop
-│   ├── context_packer.py # Utility-ranked context budgeting
-│   ├── planner.py        # LLM JSON-decision planner
-│   └── trace.py          # SQLite TraceStore + TraceEvent
-├── memory/store.py       # Tiered SQLite FTS5 memory
-├── tools/
-│   ├── registry.py       # Tool protocol + flag-aware registry
-│   └── builtin.py        # calculator, http_fetch, tavily (optional)
-├── llm/
-│   ├── protocol.py       # LLM.complete(prompt, system=...)
-│   ├── mock.py           # Deterministic mock for tests/minimal profile
-│   ├── ollama.py         # Ollama chat backend (local + cloud models)
-│   └── factory.py
-├── eval/
-│   ├── scorer.py         # expected / llm-judge / heuristic
-│   └── reflection.py     # critique prompt
-└── api/routes.py         # /runs, /traces, /memory, /tools, /config, /health
-bench/                    # tasks + runner + report
-console/                  # Next.js App Router operator console (primary UI)
-tests/                    # pytest suite (uses MockLLM, no network)
-ui/index.html             # minimal fallback trace viewer, unmaintained —
-                          # kept only for zero-dep debugging via the API
+```text
+/backend/
+    agentos/              # Core AgentOS Runtime
+        config.py         # Set profile flags natively here
+        main.py           # FastAPI entrypoint 
+        memory/
+        runtime/
+        tools/
+        llm/
+        api/
+        eval/
+    bench/                # Offline determinism benchmarks
+    clients/              # Python Client libraries
+    scripts/              # Automated report & replay hooks
+    tests/                # Pytest suites
+/frontend/                # Next.js App Router (Operator UI)
+/data/                    # SQLite databases and flashrank bounds
+/logs/                    # Trace event persistent logs 
 ```
 
 Components are instantiated once at FastAPI lifespan startup and attached
@@ -110,12 +101,12 @@ lock.
 
 ```bash
 python3 -m venv venv && source venv/bin/activate
-pip install -e '.[dev]'
+cd backend && pip install -e '.[dev]'
 
 # run the API on http://localhost:8000
-python -m agentos.main
+cd backend && python -m agentos.main
 # or
-uvicorn agentos.main:app --reload
+cd backend && uvicorn agentos.main:app --reload
 ```
 
 Open <http://localhost:8000/> for the trace viewer, or
@@ -137,7 +128,7 @@ numbers as smoke-test signal only.
 ### Optional Next.js console
 
 ```bash
-cd console && npm install && npm run dev
+cd frontend && npm install && npm run dev
 ```
 
 Point it at the API by setting `NEXT_PUBLIC_AGENTOS_API_BASE=http://localhost:8000/api/v1`.
@@ -215,7 +206,7 @@ python -m bench.runner --all-ablations
 python -m bench.report
 ```
 
-### Read this before you trust the numbers
+### Evaluation Nuances & System Characteristics
 
 The default bench runs against **MockLLM**, whose `_direct_answer`
 lookup table happens to contain the exact answer strings the benchmark
@@ -347,7 +338,7 @@ fields; prefer the console for day-to-day use.
 
 ---
 
-## Limitations (honest edition)
+## Evaluation Notes & Limitations
 
 - **MockLLM is a stub, not a model.** Its `_direct_answer` table
   contains hard-coded strings that match the benchmark expectations.

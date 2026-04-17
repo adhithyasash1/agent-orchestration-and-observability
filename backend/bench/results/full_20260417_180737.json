@@ -1,0 +1,71 @@
+{
+  "label": "full",
+  "profile": "minimal",
+  "timestamp": "2026-04-17T18:07:37",
+  "task_count": 1,
+  "overall_score": 1.0,
+  "success_rate": 1.0,
+  "tool_call_success_rate": null,
+  "tool_precision": null,
+  "tool_recall": null,
+  "context_utility_rate": null,
+  "reflection_roi": null,
+  "mean_latency_ms": 2158,
+  "total_runtime_s": 2.16,
+  "flags": {
+    "memory": true,
+    "planner": true,
+    "tools": true,
+    "reflection": true,
+    "llm_judge": false,
+    "http_fetch": false,
+    "tavily": false,
+    "mcp_plugins": true,
+    "otel": false,
+    "embeddings": true,
+    "reranker": true,
+    "embedding_cache": true,
+    "retrieval_cache": true
+  },
+  "by_category": {
+    "knowledge": {
+      "n": 1,
+      "avg_score": 1.0
+    }
+  },
+  "by_slice": {},
+  "results": [
+    {
+      "task_id": "know-01",
+      "category": "knowledge",
+      "difficulty": "easy",
+      "prompt": "What is the capital of France?",
+      "answer": "The capital of France is Paris.",
+      "score": 1.0,
+      "verification_mode": "expected",
+      "tool_calls": [],
+      "expected_tool": null,
+      "tool_match": null,
+      "expected_behavior": null,
+      "status": "ok",
+      "steps": 5,
+      "latency_ms": 2158,
+      "run_id": "cc226ded5da4",
+      "error": null,
+      "slices": [],
+      "setup_memory_ids": [],
+      "context_ids": [
+        "developer:instructions",
+        "memory:1",
+        "scratchpad:summary"
+      ],
+      "retrieval_candidates": [
+        "memory:1"
+      ],
+      "used_retrieval": false,
+      "reflection_count": 0,
+      "reflection_roi": 0.0,
+      "initial_score": 1.0
+    }
+  ]
+}
