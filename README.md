@@ -1,4 +1,4 @@
-# agentos: precision agent orchestration
+# agent orchestration and observability
 
 agentos is a high-performance framework for building agents that actually work. it focuses on observability, tiered memory, and modular tooling so you can see exactly what your agent is thinking, doing, and retrieving.
 
