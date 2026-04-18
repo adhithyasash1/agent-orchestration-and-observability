@@ -44,7 +44,7 @@ export default function TraceInspectorPage() {
 
   const { data: run, isLoading } = useQuery({
     queryKey: ["run", id],
-    queryFn: () => api.get_run(id),
+    queryFn: () => api.getRun(id),
     refetchInterval: (query) => {
       // @ts-ignore
       return query.state.data?.status === "running" ? 500 : false;
