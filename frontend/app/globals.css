@@ -3,54 +3,75 @@
 @tailwind utilities;
 
 :root {
-  --ink: #eef5ff;
-  --muted: #99acc4;
-  --shell: #07111c;
+  --background: 212 60% 7%; /* #07111c-ish */
+  --foreground: 210 40% 98%; /* #f8fafc-ish */
+  --accent: 199 95% 74%; /* #7dd3fc */
+  --accent-foreground: 212 60% 7%;
+  --muted: 214 25% 68%; /* #99acc4 */
+  --border: 214 25% 68% / 0.1;
+  --success: 142 71% 58%;
+  --danger: 351 95% 71%;
   --panel: rgba(9, 20, 35, 0.84);
-  --line: rgba(148, 163, 184, 0.16);
-  --accent: #7dd3fc;
-  --gold: #f59e0b;
-  --success: #4ade80;
-  --danger: #fb7185;
-  --font-sans: "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-  --font-serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
 }
 
-* {
-  box-sizing: border-box;
+@layer base {
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    @apply antialiased;
+    background-image: 
+      linear-gradient(to right, hsla(var(--accent) / 0.03) 1px, transparent 1px),
+      linear-gradient(to bottom, hsla(var(--accent) / 0.03) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
 }
 
-html,
-body {
-  min-height: 100%;
+@layer components {
+  .bg-glass {
+    background-color: var(--panel);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid hsla(var(--border));
+  }
+
+  .text-mono {
+    @apply font-mono tracking-tight;
+  }
+
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
 }
 
-body {
-  background-color: var(--shell);
-  color: var(--ink);
+/* Custom Gauges for Recharts Arcs */
+.recharts-sector {
+  @apply transition-all duration-500 ease-out;
 }
 
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
-  background-size: 42px 42px;
-  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.9), transparent 95%);
+/* Commmand Palette Transitions */
+[cmdk-root] {
+  @apply flex flex-col h-full bg-glass rounded-xl overflow-hidden;
 }
 
-details > summary::-webkit-details-marker {
-  display: none;
+/* Markdown Rendering Styles */
+.prose {
+  @apply text-muted leading-relaxed;
 }
-
-select {
-  color: inherit;
+.prose strong {
+  @apply text-accent font-semibold;
 }
-
-option {
-  background: #0b1420;
-  color: white;
+.prose code {
+  background-color: hsl(var(--background));
+  border: 1px solid hsla(var(--border));
+  @apply rounded text-accent text-sm font-mono px-1.5 py-0.5;
+}
+.prose pre {
+  background-color: hsl(var(--background));
+  border-radius: 0.5rem;
+  border: 1px solid hsla(var(--border));
+  @apply mt-4 p-4 overflow-x-auto;
 }

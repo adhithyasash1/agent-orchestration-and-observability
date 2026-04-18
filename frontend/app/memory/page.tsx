@@ -1,125 +1,307 @@
 "use client";
 
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { api } from "@/lib/api";
+import { 
+  Database, 
+  Search, 
+  Trash2, 
+  Plus, 
+  Clock, 
+  ShieldCheck, 
+  Sparkles,
+  Info,
+  Layers,
+  Activity,
+  ChevronRight
+} from "lucide-react";
+import { cn } from "@/lib/utils";
 import { useState } from "react";
-import { MOCK_MEMORY } from "@/lib/mock-data";
-import { Database, SlidersHorizontal, Plus, Search, ChevronDown } from "lucide-react";
-import { motion } from "motion/react";
+import { motion, AnimatePresence } from "motion/react";
+import { useStore } from "@/lib/store";
 
-export default function MemoryExplorerPage() {
-  const [topK, setTopK] = useState(3);
-  const [activeFilter, setActiveFilter] = useState<string>("all");
-  
-  const memories = MOCK_MEMORY.filter(m => activeFilter === "all" || m.type === activeFilter);
+const KINDS = ["working", "episodic", "semantic", "experience", "style", "failure"];
+
+export default function MemoryConsolePage() {
+  const queryClient = useQueryClient();
+  const { showToast } = useStore();
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedKinds, setSelectedKinds] = useState<string[]>([]);
+
+  const { data: stats } = useQuery({
+    queryKey: ["memory-stats"],
+    queryFn: () => api.getMemoryStats(),
+    refetchInterval: 5000,
+  });
+
+  const { data: searchResults, isLoading: isSearching } = useQuery({
+    queryKey: ["memory-search", searchQuery, selectedKinds],
+    queryFn: () => api.searchMemory({ 
+      query: searchQuery, 
+      kinds: selectedKinds.length ? selectedKinds : undefined,
+      k: 10 
+    }),
+    enabled: searchQuery.length > 2,
+  });
+
+  const purgeMutation = useMutation({
+    mutationFn: (kind: string) => api.purgeSystem(kind),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["memory-stats"] });
+      showToast("Memory purged successfully", "success");
+    },
+  });
+
+  const toggleKind = (kind: string) => {
+    setSelectedKinds(prev => 
+      prev.includes(kind) ? prev.filter(k => k !== kind) : [...prev, kind]
+    );
+  };
 
   return (
-    <div className="flex flex-col h-full bg-[#0A0A0C]">
-      
-      {/* Header Sticky Boundary */}
-      <header className="flex flex-col border-b border-[#222224] bg-[#0A0A0C]/90 backdrop-blur-md px-6 py-4 space-y-4">
-        <div className="flex items-center gap-3">
-           <div className="flex items-center justify-center h-8 w-8 rounded-md bg-indigo-500/10 text-indigo-400">
-              <Database className="h-4 w-4" />
-           </div>
-           <div>
-              <h1 className="text-[14px] font-semibold text-[#E4E4E5]">Memory Explorer</h1>
-              <p className="text-[12px] text-[#8F8F94]">Hybrid Document & Episodic Store Tracking</p>
-           </div>
+    <div className="space-y-10 animate-fade-in pb-20">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Memory Ecosystem</h1>
+          <p className="text-muted mt-1">Cross-tier storage for experience, experience and semantic grounding.</p>
+        </div>
+        <div className="flex items-center gap-4 px-4 py-2 bg-glass rounded-xl border border-white/10">
+          <Layers className="w-4 h-4 text-purple-400" />
+          <span className="text-sm font-mono font-bold">{stats?.count || 0} Total Vectors</span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+        {KINDS.map((kind) => (
+          <MemoryTierCard 
+            key={kind}
+            kind={kind}
+            count={stats?.by_kind[kind] || 0}
+            active={selectedKinds.includes(kind)}
+            onClick={() => toggleKind(kind)}
+          />
+        ))}
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+        <div className="lg:col-span-8 space-y-6">
+          <div className="relative">
+            <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+              <Search className="w-5 h-5 text-muted" />
+            </div>
+            <input 
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Query semantic memory or search experiences..."
+              className="w-full bg-background/50 border border-border rounded-xl pl-12 pr-4 py-4 text-sm focus:ring-1 focus:ring-accent outline-none"
+            />
+            {isSearching && (
+              <div className="absolute right-4 top-1/2 -translate-y-1/2">
+                <div className="w-4 h-4 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-4">
+            <div className="flex items-center justify-between px-2">
+              <h3 className="text-xs font-bold text-muted uppercase tracking-widest">Search Results</h3>
+              <div className="flex gap-2">
+                {KINDS.map(kind => (
+                  <button 
+                    key={kind}
+                    onClick={() => toggleKind(kind)}
+                    className={cn(
+                      "px-3 py-1 rounded-full text-[10px] font-bold uppercase border transition-all",
+                      selectedKinds.includes(kind) ? "bg-accent border-accent text-accent-foreground" : "bg-white/5 border-border text-muted hover:text-foreground"
+                    )}
+                  >
+                    {kind}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <AnimatePresence mode="popLayout">
+                {searchResults?.results?.map((res: any) => (
+                  <SearchResultCard key={res.id} result={res} />
+                ))}
+                {!isSearching && searchQuery.length > 2 && searchResults?.results?.length === 0 && (
+                  <div className="p-12 text-center text-muted text-sm bg-glass rounded-2xl border border-dashed border-border">
+                    No results found in selected memory tiers for your query.
+                  </div>
+                )}
+              </AnimatePresence>
+            </div>
+          </div>
         </div>
 
-        {/* Global Controls */}
-        <div className="flex flex-wrap items-center gap-4">
-           {/* Filters */}
-           <div className="flex items-center gap-2 p-1 rounded-md bg-[#111113] border border-[#222224]">
-              {['all', 'semantic', 'experience', 'failure'].map(type => (
-                 <button 
-                   key={type}
-                   onClick={() => setActiveFilter(type)}
-                   className={`px-3 py-1 rounded text-[11px] font-medium tracking-wide uppercase transition-colors ${
-                     activeFilter === type 
-                        ? 'bg-[#2A2A2E] text-white' 
-                        : 'text-[#5A5A5F] hover:text-[#8F8F94]'
-                   }`}
-                 >
-                   {type}
-                 </button>
-              ))}
-           </div>
-           
-           <div className="w-px h-6 bg-[#222224]" />
-
-           {/* Top_K Slider control */}
-           <div className="flex items-center gap-3 flex-1 min-w-[200px] max-w-sm px-4 py-2 rounded-md bg-[#111113] border border-[#222224]">
-              <SlidersHorizontal className="h-3.5 w-3.5 text-[#5A5A5F]" />
-              <span className="text-[11px] font-mono text-[#8F8F94] w-12">top_k:{topK}</span>
-              <input 
-                type="range" 
-                min="1" 
-                max="10" 
-                value={topK}
-                onChange={(e) => setTopK(Number(e.target.value))}
-                className="w-full accent-indigo-500 h-1 bg-[#222224] rounded-lg appearance-none cursor-pointer"
+        <div className="lg:col-span-4 space-y-8">
+          <section className="bg-glass rounded-2xl p-6 border border-border space-y-6">
+            <h3 className="text-sm font-bold flex items-center gap-2">
+              <Activity className="w-4 h-4 text-accent" />
+              Memory Hygiene
+            </h3>
+            <div className="space-y-5">
+              <HygieneAction 
+                label="Clear Working Tier" 
+                description="Removes intermediate step data from current sessions." 
+                onPurge={() => purgeMutation.mutate("working")}
               />
-           </div>
+              <HygieneAction 
+                label="Vacuum Semantic" 
+                description="Compresses vector index and removes orphaned nodes." 
+                onPurge={() => purgeMutation.mutate("semantic")}
+              />
+              <HygieneAction 
+                label="Purge Experience" 
+                description="Wipes all agent journey experiences. Warning: Irreversible." 
+                danger
+                onPurge={() => purgeMutation.mutate("experience")}
+              />
+            </div>
+          </section>
 
-           <div className="ml-auto relative">
-              <button className="flex items-center justify-between gap-3 w-48 px-3 py-2 rounded-md bg-[#111113] border border-[#222224] text-[12px] text-[#D1D1D4] hover:border-[#3A3A40] transition-colors">
-                <span className="flex items-center gap-2"><Search className="h-3.5 w-3.5 text-[#5A5A5F]" /> Semantic Search</span>
-              </button>
-           </div>
+          <section className="bg-glass rounded-2xl p-6 border border-border space-y-4">
+            <h3 className="text-sm font-bold flex items-center gap-2">
+              <Info className="w-4 h-4 text-purple-400" />
+              Tiering Logic
+            </h3>
+            <p className="text-xs text-muted leading-relaxed">
+              AgentOS uses a tiered memory architecture. Items with verifier scores {">"} 0.7 are promoted to <span className="text-accent">Episodic</span>. Successfully synthesized insights enter <span className="text-purple-400">Semantic</span> long-term storage.
+            </p>
+          </section>
         </div>
-      </header>
-
-      {/* Grid Explorer */}
-      <main className="flex-1 overflow-auto p-6">
-         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-           {memories.slice(0, topK).map((mem, idx) => (
-             <motion.div 
-               initial={{ opacity: 0, scale: 0.98 }}
-               animate={{ opacity: 1, scale: 1 }}
-               transition={{ delay: idx * 0.05 }}
-               key={mem.id} 
-               className="group flex flex-col rounded-xl border border-[#222224] bg-[#0F0F12] overflow-hidden hover:border-[#3A3A40] transition-colors"
-             >
-                <div className="p-4 flex-1">
-                   {/* Meta Headers */}
-                   <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-                      <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-sm ${
-                        mem.type === 'failure' ? 'bg-red-500/10 text-red-400' :
-                        mem.type === 'experience' ? 'bg-emerald-500/10 text-emerald-400' :
-                        'bg-indigo-500/10 text-indigo-400'
-                      }`}>
-                        {mem.type} Layer
-                      </span>
-                      <span className="text-[11px] font-mono text-[#8F8F94]">Sim: {mem.score}</span>
-                   </div>
-                   
-                   <div className="text-[13px] leading-relaxed text-[#D1D1D4] mb-4">
-                     {mem.content}
-                   </div>
-                </div>
-
-                {/* Card Footer Controls */}
-                <div className="border-t border-[#222224] bg-[#141416] p-3 flex items-center justify-between">
-                   <div className="flex flex-col">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-[#5A5A5F]">Origin</span>
-                      <span className="text-[11px] font-mono text-[#8F8F94] hover:text-indigo-400 hover:underline cursor-pointer">{mem.origin}</span>
-                   </div>
-                   
-                   {/* Simulated Injector */}
-                   <button className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-indigo-500 hover:bg-indigo-400 transition-colors text-white text-[11px] font-medium opacity-0 group-hover:opacity-100 focus:opacity-100 duration-200">
-                     <Plus className="h-3 w-3" /> Inject Prompt
-                   </button>
-                </div>
-             </motion.div>
-           ))}
-         </div>
-         {memories.length === 0 && (
-           <div className="flex items-center justify-center p-12 text-[13px] text-[#5A5A5F]">
-             No memories matched this filter configuration.
-           </div>
-         )}
-      </main>
-
+      </div>
     </div>
+  );
+}
+
+function MemoryTierCard({ kind, count, active, onClick }: any) {
+  const icons: Record<string, any> = {
+    working: Clock,
+    episodic: ShieldCheck,
+    semantic: Database,
+    experience: Sparkles,
+    style: Activity,
+    failure: AlertTriangle
+  };
+  const Icon = icons[kind] || Database;
+  const descriptions: Record<string, string> = {
+    working: "Volatile step data",
+    episodic: "Verified run history",
+    semantic: "Core factual knowledge",
+    experience: "Synthesized wisdom",
+    style: "Linguistic preferences",
+    failure: "Negative patterns"
+  };
+  const description = descriptions[kind];
+
+  return (
+    <div 
+      onClick={onClick}
+      className={cn(
+        "group relative p-4 rounded-2xl border transition-all cursor-pointer overflow-hidden active:scale-95",
+        active ? "bg-accent/10 border-accent shadow-[0_0_15px_rgba(125,211,252,0.1)]" : "bg-glass border-white/5 hover:border-white/20"
+      )}
+    >
+      <div className="flex flex-col gap-4 relative z-10">
+        <div className={cn("p-2 rounded-lg w-fit", active ? "bg-accent text-accent-foreground" : "bg-white/5 text-muted")}>
+          <Icon className="w-5 h-5" />
+        </div>
+        <div className="flex flex-col">
+          <span className={cn("text-2xl font-mono font-bold tabular-nums", active ? "text-accent" : "")}>{count}</span>
+          <span className="text-xs font-bold uppercase tracking-widest text-muted group-hover:text-foreground transition-colors">{kind}</span>
+        </div>
+      </div>
+      
+      {/* Description Tooltip (Simplified) */}
+      <div className="absolute inset-0 z-20 opacity-0 group-hover:opacity-100 bg-background/95 backdrop-blur-sm p-4 text-[10px] text-muted flex items-center justify-center text-center transition-all duration-300 pointer-events-none rounded-2xl border border-accent/20">
+        {description}
+      </div>
+    </div>
+  );
+}
+
+function SearchResultCard({ result }: { result: any }) {
+  return (
+    <motion.div 
+      layout
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.95 }}
+      className="p-5 bg-glass border border-white/10 rounded-2xl group hover:border-accent/40 transition-all shadow-xl"
+    >
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-3">
+          <span className="text-[10px] px-2 py-0.5 rounded bg-accent/10 text-accent font-mono font-bold uppercase border border-accent/20 tracking-widest">{result.kind}</span>
+          <span className="text-[10px] text-muted font-mono">{new Date().toLocaleDateString()}</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] text-muted font-bold uppercase tracking-wider">Salience</span>
+          <div className="w-16 h-1 bg-white/5 rounded-full overflow-hidden">
+            <div className="h-full bg-accent" style={{ width: `${result.salience * 100}%` }} />
+          </div>
+          <span className="text-[10px] font-mono text-accent">{(result.salience * 100).toFixed(0)}%</span>
+        </div>
+      </div>
+
+      <div className="prose prose-sm prose-invert max-w-none">
+        <p className="text-muted-foreground leading-relaxed italic group-hover:text-foreground transition-colors">
+          "{result.text}"
+        </p>
+      </div>
+      
+      {result.run_id && (
+        <div className="mt-4 pt-4 border-t border-white/5 flex items-center justify-between">
+          <span className="text-[10px] text-muted font-mono uppercase">Origin: {result.run_id.slice(0, 8)}</span>
+          <Link href={`/runs/${result.run_id}`} className="text-[10px] text-accent font-bold uppercase flex items-center gap-1 hover:underline">
+            View Source <ChevronRight className="w-3 h-3" />
+          </Link>
+        </div>
+      )}
+    </motion.div>
+  );
+}
+
+function HygieneAction({ label, description, onPurge, danger }: any) {
+  return (
+    <div className="space-y-2 group">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-bold uppercase tracking-widest">{label}</span>
+        <button 
+          onClick={onPurge}
+          className={cn(
+            "p-2 rounded-lg transition-all", 
+            danger ? "hover:bg-danger/10 text-danger" : "hover:bg-white/10 text-muted hover:text-foreground"
+          )}
+        >
+          <Trash2 className="w-4 h-4" />
+        </button>
+      </div>
+      <p className="text-[10px] text-muted leading-relaxed">{description}</p>
+      <div className="h-px bg-border w-full" />
+    </div>
+  );
+}
+
+function AlertTriangle(props: any) {
+  return (
+    <svg 
+      xmlns="http://www.w3.org/2000/svg" 
+      width="24" 
+      height="24" 
+      viewBox="0 0 24 24" 
+      fill="none" 
+      stroke="currentColor" 
+      strokeWidth="2" 
+      strokeLinecap="round" 
+      strokeLinejoin="round" 
+      {...props}
+    >
+      <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+      <path d="M12 9v4" />
+      <path d="M12 17h.01" />
+    </svg>
   );
 }

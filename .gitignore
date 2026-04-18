@@ -4,7 +4,15 @@ __pycache__/
 .pytest_cache/
 data/
 .env
-bench/results/*.json
-!bench/results/.gitkeep
+bench/
+!bench/.gitkeep
 scratch/
 backend.log
+*.egg-info/
+dist/
+build/
+*.so
+.DS_Store
+frontend/.next/
+frontend/node_modules/
+frontend/out/

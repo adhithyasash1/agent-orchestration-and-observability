@@ -2,37 +2,59 @@ import type { Config } from "tailwindcss";
 
 const config: Config = {
   content: [
-    "./app/**/*.{ts,tsx}",
-    "./components/**/*.{ts,tsx}",
-    "./lib/**/*.{ts,tsx}"
+    "./pages/**/*.{js,ts,jsx,tsx,mdx}",
+    "./components/**/*.{js,ts,jsx,tsx,mdx}",
+    "./app/**/*.{js,ts,jsx,tsx,mdx}",
   ],
   theme: {
     extend: {
       colors: {
-        ink: "var(--ink)",
-        muted: "var(--muted)",
-        shell: "var(--shell)",
-        panel: "var(--panel)",
-        line: "var(--line)",
-        accent: "var(--accent)",
-        gold: "var(--gold)",
-        success: "var(--success)",
-        danger: "var(--danger)"
-      },
-      boxShadow: {
-        panel: "0 24px 90px rgba(2, 6, 23, 0.25)"
+        background: "hsl(var(--background))",
+        foreground: "hsl(var(--foreground))",
+        panel: "rgba(9, 20, 35, 0.84)",
+        accent: {
+          DEFAULT: "hsl(var(--accent))",
+          foreground: "hsl(var(--accent-foreground))",
+        },
+        gold: {
+          DEFAULT: "#f59e0b",
+          foreground: "#07111c",
+        },
+        success: "hsl(var(--success))",
+        danger: "hsl(var(--danger))",
+        muted: "hsl(var(--muted))",
+        border: "hsl(var(--border))",
       },
       fontFamily: {
-        sans: ["var(--font-sans)", "sans-serif"],
-        serif: ["var(--font-serif)", "serif"]
+        mono: ["var(--font-geist-mono)", "ui-monospace", "SFMono-Regular", "Menlo", "Monaco", "Consolas", "Liberation Mono", "Courier New", "monospace"],
       },
       backgroundImage: {
-        "shell-glow":
-          "radial-gradient(circle at top left, rgba(56, 189, 248, 0.18), transparent 30%), radial-gradient(circle at top right, rgba(245, 158, 11, 0.14), transparent 28%), linear-gradient(180deg, #06101b 0%, #0a1628 55%, #050d18 100%)"
-      }
-    }
+        "grid-pattern": "linear-gradient(to right, hsla(var(--accent) / 0.05) 1px, transparent 1px), linear-gradient(to bottom, hsla(var(--accent) / 0.05) 1px, transparent 1px)",
+      },
+      backgroundSize: {
+        "grid-size": "32px 32px",
+      },
+      animation: {
+        "fade-in": "fadeIn 0.3s ease-out forwards",
+        "slide-down": "slideDown 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards",
+        "pulse-subtle": "pulseSubtle 2s infinite ease-in-out",
+      },
+      keyframes: {
+        fadeIn: {
+          "0%": { opacity: "0" },
+          "100%": { opacity: "1" },
+        },
+        slideDown: {
+          "0%": { transform: "translateY(-10px)", opacity: "0" },
+          "100%": { transform: "translateY(0)", opacity: "1" },
+        },
+        pulseSubtle: {
+          "0%, 100%": { opacity: "0.8" },
+          "50%": { opacity: "1" },
+        },
+      },
+    },
   },
-  plugins: []
+  plugins: [],
 };
-
 export default config;
