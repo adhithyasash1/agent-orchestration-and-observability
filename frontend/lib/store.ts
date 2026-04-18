@@ -1,41 +1,53 @@
-import { create } from 'zustand';
-import { api } from './api';
-import type { AgentConfig } from './types';
+import { create } from "zustand";
+import { persist } from "zustand/middleware";
+import { AgentConfig } from "./types";
 
-interface AppState {
-  isCommandMenuOpen: boolean;
-  setCommandMenuOpen: (open: boolean) => void;
-  toggleCommandMenu: () => void;
+interface UIState {
+  activeRunId: string | null;
+  setActiveRunId: (id: string | null) => void;
   
-  // Settings & Config
-  config: AgentConfig | null;
-  fetchConfig: () => Promise<void>;
-  updateConfig: (patch: Partial<AgentConfig>) => Promise<void>;
+  isCommandPaletteOpen: boolean;
+  setCommandPaletteOpen: (open: boolean) => void;
+  
+  settingsCache: AgentConfig | null;
+  setSettingsCache: (config: AgentConfig | null) => void;
+  
+  lastPurgeTs: number | null;
+  recordPurge: () => void;
 
-  // Simulated Agent Task State
-  isAgentRunning: boolean;
-  setAgentRunning: (running: boolean) => void;
+  toast: { message: string; type: "success" | "error" | "info" } | null;
+  showToast: (message: string, type?: "success" | "error" | "info") => void;
+  hideToast: () => void;
 }
 
-export const useAppStore = create<AppState>((set) => ({
-  isCommandMenuOpen: false,
-  setCommandMenuOpen: (open) => set({ isCommandMenuOpen: open }),
-  toggleCommandMenu: () => set((state) => ({ isCommandMenuOpen: !state.isCommandMenuOpen })),
-  
-  config: null,
-  fetchConfig: async () => {
-    try {
-      const config = await api.getConfig();
-      set({ config });
-    } catch (e) { console.error(e); }
-  },
-  updateConfig: async (patch) => {
-    try {
-      const { current } = await api.patchConfig(patch);
-      set({ config: current });
-    } catch (e) { console.error(e); }
-  },
+export const useStore = create<UIState>()(
+  persist(
+    (set) => ({
+      activeRunId: null,
+      setActiveRunId: (activeRunId) => set({ activeRunId }),
+      
+      isCommandPaletteOpen: false,
+      setCommandPaletteOpen: (isCommandPaletteOpen) => set({ isCommandPaletteOpen }),
+      
+      settingsCache: null,
+      setSettingsCache: (settingsCache) => set({ settingsCache }),
+      
+      lastPurgeTs: null,
+      recordPurge: () => set({ lastPurgeTs: Date.now() }),
 
-  isAgentRunning: false,
-  setAgentRunning: (running) => set({ isAgentRunning: running })
-}));
+      toast: null,
+      showToast: (message, type = "info") => {
+        set({ toast: { message, type } });
+        setTimeout(() => set({ toast: null }), 3000);
+      },
+      hideToast: () => set({ toast: null }),
+    }),
+    {
+      name: "agentos-storage",
+      partialize: (state) => ({ 
+        activeRunId: state.activeRunId,
+        settingsCache: state.settingsCache
+      }),
+    }
+  )
+);

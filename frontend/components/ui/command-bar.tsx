@@ -1,89 +1,128 @@
 "use client";
 
-import { useEffect } from "react";
-import { Command } from "cmdk";
-import * as Dialog from "@radix-ui/react-dialog";
+import * as React from "react";
 import { useRouter } from "next/navigation";
-import { useAppStore } from "@/lib/store";
-import { Bolt, Terminal, Database, Play } from "lucide-react";
+import { Command } from "cmdk";
+import { 
+  LayoutDashboard, 
+  Terminal, 
+  Database, 
+  Settings, 
+  MessageSquare,
+  Search,
+  Plus,
+  Trash2
+} from "lucide-react";
+import { useStore } from "@/lib/store";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api";
 
 export function CommandBar() {
   const router = useRouter();
-  const open = useAppStore(state => state.isCommandMenuOpen);
-  const setOpen = useAppStore(state => state.setCommandMenuOpen);
+  const { isCommandPaletteOpen, setCommandPaletteOpen } = useStore();
+  const [searchQuery, setSearchQuery] = React.useState("");
 
-  useEffect(() => {
+  React.useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
-        setOpen(true);
+        setCommandPaletteOpen(!isCommandPaletteOpen);
       }
     };
     document.addEventListener("keydown", down);
     return () => document.removeEventListener("keydown", down);
-  }, [setOpen]);
+  }, [isCommandPaletteOpen, setCommandPaletteOpen]);
+
+  const { data: memoryResults } = useQuery({
+    queryKey: ["memory-search", searchQuery],
+    queryFn: () => api.searchMemory({ query: searchQuery, k: 5 }),
+    enabled: searchQuery.length > 2,
+  });
+
+  const navigate = (path: string) => {
+    router.push(path);
+    setCommandPaletteOpen(false);
+  };
+
+  if (!isCommandPaletteOpen) return null;
 
   return (
-    <Dialog.Root open={open} onOpenChange={setOpen}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 transition-all duration-200" />
-        <Dialog.Content className="fixed top-[20%] left-1/2 -translate-x-1/2 w-full max-w-2xl bg-[#141418] border border-[#2A2A2E] rounded-xl shadow-2xl z-50 overflow-hidden">
-          <Dialog.Title className="sr-only">Command Menu</Dialog.Title>
-          <Dialog.Description className="sr-only">Quick access actions for AgentOS</Dialog.Description>
-          <Command className="w-full flex flex-col" label="Global Command Menu">
-            <div className="flex items-center px-4 py-3 border-b border-[#2A2A2E]">
-               <Command.Input 
-                 placeholder="What should the agent do? Or type a command..." 
-                 className="flex-1 bg-transparent text-[15px] font-medium text-white placeholder:text-[#5A5A5F] focus:outline-none"
-               />
-               <kbd className="hidden sm:inline-flex bg-[#2A2A2E] px-1.5 py-0.5 rounded text-[10px] font-mono text-[#8A8A93]">ESC</kbd>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm animate-fade-in font-sans">
+      <div className="w-full max-w-2xl bg-glass shadow-2xl rounded-2xl border border-white/10 overflow-hidden animate-slide-down">
+        <Command className="flex flex-col h-[450px] bg-transparent">
+          <div className="flex items-center px-4 border-b border-border gap-3">
+            <Search className="w-5 h-5 text-muted" />
+            <Command.Input
+              autoFocus
+              value={searchQuery}
+              onValueChange={setSearchQuery}
+              placeholder="Search or type a command..."
+              className="flex-1 h-14 bg-transparent border-none outline-none text-foreground placeholder:text-muted focus:ring-0"
+            />
+          </div>
+
+          <Command.List className="overflow-y-auto p-2 scrollbar-hide">
+            <Command.Empty className="py-12 text-center text-muted">
+              No results found for "{searchQuery}"
+            </Command.Empty>
+
+            <Command.Group heading="Navigation" className="px-2 py-1 text-xs font-bold text-muted uppercase tracking-widest bg-transparent">
+              <CommandItem icon={LayoutDashboard} onSelect={() => navigate("/")}>Dashboard</CommandItem>
+              <CommandItem icon={Terminal} onSelect={() => navigate("/runs")}>Runs</CommandItem>
+              <CommandItem icon={Database} onSelect={() => navigate("/memory")}>Memory Console</CommandItem>
+              <CommandItem icon={MessageSquare} onSelect={() => navigate("/chat")}>Live Chat</CommandItem>
+              <CommandItem icon={Settings} onSelect={() => navigate("/settings")}>Settings</CommandItem>
+            </Command.Group>
+
+            {memoryResults?.results && memoryResults.results.length > 0 && (
+              <Command.Group heading="Memory Results" className="mt-4 px-2 py-1 text-xs font-bold text-muted uppercase tracking-widest bg-transparent">
+                {memoryResults.results.map((item) => (
+                  <Command.Item
+                    key={item.id}
+                    className="flex flex-col gap-1 p-3 rounded-xl hover:bg-white/5 cursor-pointer aria-selected:bg-white/5"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs px-1.5 py-0.5 rounded bg-accent/10 text-accent font-mono uppercase">{item.kind}</span>
+                      <span className="text-[10px] text-muted font-mono">Salience: {(item.salience * 100).toFixed(0)}</span>
+                    </div>
+                    <p className="text-sm line-clamp-1 text-muted-foreground">{item.text}</p>
+                  </Command.Item>
+                ))}
+              </Command.Group>
+            )}
+
+            <Command.Group heading="System" className="mt-4 px-2 py-1 text-xs font-bold text-muted uppercase tracking-widest bg-transparent">
+              <CommandItem icon={Plus} onSelect={() => navigate("/")}>New Run</CommandItem>
+              <CommandItem icon={Trash2} onSelect={() => navigate("/memory")}>Purge System</CommandItem>
+            </Command.Group>
+          </Command.List>
+
+          <div className="mt-auto px-4 py-3 border-t border-border bg-white/5 flex items-center justify-between text-[10px] uppercase tracking-wider text-muted font-bold">
+            <div className="flex gap-4">
+              <span>↑↓ Navigate</span>
+              <span>⏎ Select</span>
+              <span>ESC Close</span>
             </div>
+            <span>⌘K Command Palette</span>
+          </div>
+        </Command>
+      </div>
+      <div 
+        className="absolute inset-0 -z-10" 
+        onClick={() => setCommandPaletteOpen(false)} 
+      />
+    </div>
+  );
+}
 
-            <Command.List className="max-h-[300px] overflow-y-auto px-2 py-3">
-              <Command.Empty className="py-6 text-center text-sm text-[#5A5A5F]">No results found.</Command.Empty>
-
-              <Command.Group heading={<span className="text-[10px] uppercase font-semibold text-[#5A5A5F] px-2 mb-1 block">Actions</span>}>
-                <Command.Item 
-                  onSelect={() => {
-                     setOpen(false)
-                     // Navigate to terminal mode/dashboard
-                     router.push('/')
-                  }}
-                  className="flex items-center gap-3 px-3 py-2.5 rounded-md text-[13px] text-[#D1D1D4] aria-selected:bg-[#1E1E24] aria-selected:text-white cursor-pointer transition-colors"
-                >
-                  <Play className="h-4 w-4 text-indigo-400" />
-                  Trigger New Agent Run
-                </Command.Item>
-                <Command.Item 
-                  className="flex items-center gap-3 px-3 py-2.5 rounded-md text-[13px] text-[#D1D1D4] aria-selected:bg-[#1E1E24] aria-selected:text-white cursor-pointer transition-colors"
-                >
-                  <Bolt className="h-4 w-4 text-amber-400" />
-                  Run Offline Evaluation Benchmark
-                </Command.Item>
-              </Command.Group>
-
-              <div className="h-px bg-[#2A2A2E] my-2 mx-1" />
-
-              <Command.Group heading={<span className="text-[10px] uppercase font-semibold text-[#5A5A5F] px-2 mb-1 block">Navigation</span>}>
-                <Command.Item 
-                  onSelect={() => { setOpen(false); router.push('/runs/run_8f7b2c9a'); }}
-                  className="flex items-center gap-3 px-3 py-2.5 rounded-md text-[13px] text-[#D1D1D4] aria-selected:bg-[#1E1E24] aria-selected:text-white cursor-pointer transition-colors"
-                >
-                  <Terminal className="h-4 w-4 text-[#8A8A93]" />
-                  View Top Trace
-                </Command.Item>
-                <Command.Item 
-                  onSelect={() => { setOpen(false); router.push('/memory'); }}
-                  className="flex items-center gap-3 px-3 py-2.5 rounded-md text-[13px] text-[#D1D1D4] aria-selected:bg-[#1E1E24] aria-selected:text-white cursor-pointer transition-colors"
-                >
-                  <Database className="h-4 w-4 text-[#8A8A93]" />
-                  Search Memory Database
-                </Command.Item>
-              </Command.Group>
-            </Command.List>
-          </Command>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+function CommandItem({ children, icon: Icon, onSelect }: { children: React.ReactNode, icon: any, onSelect: () => void }) {
+  return (
+    <Command.Item
+      onSelect={onSelect}
+      className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-white/5 cursor-pointer text-sm text-foreground hover:text-accent transition-colors aria-selected:bg-white/5 aria-selected:text-accent"
+    >
+      <Icon className="w-5 h-5 flex-shrink-0" />
+      {children}
+    </Command.Item>
   );
 }

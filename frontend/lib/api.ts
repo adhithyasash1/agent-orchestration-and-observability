@@ -4,7 +4,9 @@ import type {
   MemoryStats,
   RunDetail,
   RunSummary,
-  ToolInfo
+  ToolInfo,
+  AgentConfig,
+  MemorySearchResult
 } from "@/lib/types";
 
 const API_BASE =
@@ -21,7 +23,8 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+    const errorBody = await response.json().catch(() => ({}));
+    throw new Error(errorBody.detail || `${response.status} ${response.statusText}`);
   }
 
   return response.json() as Promise<T>;
@@ -31,7 +34,7 @@ export const api = {
   getHealth: () => apiFetch<HealthResponse>("/health"),
   getMemoryStats: () => apiFetch<MemoryStats>("/memory/stats"),
   getTools: () => apiFetch<ToolInfo[]>("/tools"),
-  listRuns: (limit = 40) => apiFetch<RunSummary[]>(`/runs?limit=${limit}`),
+  listRuns: (limit = 50) => apiFetch<RunSummary[]>(`/runs?limit=${limit}`),
   getRun: (runId: string) => apiFetch<RunDetail>(`/runs/${runId}`),
   createRun: (input: string) =>
     apiFetch<CreateRunResponse>("/runs", {
@@ -47,8 +50,13 @@ export const api = {
       }
     ),
   getConfig: () => apiFetch<AgentConfig>("/config"),
-  patchConfig: (payload: Partial<AgentConfig>) =>
+  patchConfig: (payload: Partial<AgentConfig["flags"] | { context_char_budget: number, profile: string }>) =>
     apiFetch<{ updated: Record<string, any>; current: AgentConfig }>("/config", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  searchMemory: (payload: { query: string; k?: number; kinds?: string[]; min_salience?: number }) =>
+    apiFetch<{ results: MemorySearchResult[] }>("/memory/search", {
       method: "POST",
       body: JSON.stringify(payload)
     }),
@@ -57,8 +65,4 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ kind })
     }),
-  dumpContext: (runId?: string) =>
-    apiFetch<{ status: string; target: string }>("/debug/dump-context" + (runId ? `?run_id=${runId}` : ""), {
-      method: "POST"
-    })
 };
