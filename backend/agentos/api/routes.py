@@ -9,13 +9,26 @@ A `_config_lock` serializes `/config` patches — the handler builds a fresh
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.concurrency import asynccontextmanager
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 import re
+
+try:
+    from sse_starlette.sse import EventSourceResponse
+except ImportError:
+    class EventSourceResponse(StreamingResponse):
+        def __init__(self, content, **kwargs):
+            async def _event_stream():
+                async for event in content:
+                    yield f"data: {event.get('data', '')}\n\n"
+
+            super().__init__(_event_stream(), media_type="text/event-stream", **kwargs)
 
 from ..config import Settings
 from ..llm import build_llm
@@ -190,12 +203,72 @@ async def list_runs(limit: int = 50, c: Components = Depends(get_components)):
     return c.traces.list_runs(limit=limit)
 
 
+@api_router.get("/runs/export")
+async def export_rlhf(
+    format: str = "jsonl",
+    min_rating: int = 4,
+    max_rating: int = 2,
+    c: Components = Depends(get_components),
+):
+    """
+    Export preference pairs from run_transitions for offline training.
+    Returns JSONL with {chosen, rejected, prompt} tuples derived from
+    runs where user_feedback.rating >= min_rating (chosen) vs <= max_rating (rejected).
+    """
+    runs = c.traces.list_runs(limit=500)
+    pairs = []
+    for run in runs:
+        fb = run.get("user_feedback") or {}
+        rating = fb.get("rating")
+        if rating is None:
+            continue
+        full = c.traces.get_run(run["run_id"])
+        entry = {
+            "prompt": run["user_input"],
+            "response": run["final_output"],
+            "score": run["score"],
+            "rating": rating,
+            "label": "chosen" if rating >= min_rating else
+                     "rejected" if rating <= max_rating else "neutral",
+            "transitions": full.get("transitions", []) if full else [],
+        }
+        if entry["label"] != "neutral":
+            pairs.append(entry)
+    if format == "jsonl":
+        content = "\n".join(json.dumps(p, default=str) for p in pairs)
+        return PlainTextResponse(content, media_type="application/x-ndjson")
+    return pairs
+
+
 @api_router.get("/runs/{run_id}")
 async def get_run(run_id: str, c: Components = Depends(get_components)):
     run = c.traces.get_run(run_id)
     if not run:
         raise HTTPException(404, "run not found")
     return run
+
+
+@api_router.get("/runs/{run_id}/stream")
+async def stream_run_events(run_id: str, c: Components = Depends(get_components)):
+    """SSE endpoint — streams trace events as they are written, then the final run."""
+
+    async def generator():
+        last_id = 0
+        while True:
+            events = c.traces.get_events_since(run_id, last_id)
+            for event in events:
+                last_id = event["id"]
+                yield {"data": json.dumps(event, default=str)}
+            run = c.traces.get_run(run_id)
+            if not run:
+                yield {"data": json.dumps({"error": "run not found"})}
+                break
+            if run["status"] != "running":
+                yield {"data": json.dumps({"done": True, "run": run}, default=str)}
+                break
+            await asyncio.sleep(0.25)
+
+    return EventSourceResponse(generator())
 
 
 @api_router.post("/runs/{run_id}/feedback")
@@ -252,6 +325,7 @@ async def get_config(c: Components = Depends(get_components)):
     return c.settings.describe()
 
 
+@api_router.patch("/config")
 @api_router.post("/config")
 async def patch_config(patch: ConfigPatch, request: Request):
     """Patch feature flags atomically.
@@ -292,7 +366,10 @@ async def patch_config(patch: ConfigPatch, request: Request):
 
 
 class PurgeRequest(BaseModel):
-    kind: str | None = Field(default=None, pattern="^(working|episodic|semantic|all)$")
+    kind: str | None = Field(
+        default=None,
+        pattern="^(working|episodic|semantic|experience|style|failure|all)$",
+    )
 
 
 @api_router.post("/system/purge")
@@ -327,9 +404,7 @@ def _clone_settings(settings: Settings, overrides: dict[str, Any]) -> Settings:
     """
     data = settings.model_dump()
     data.update(overrides)
-    new_settings = Settings(**data)
-    new_settings.apply_profile()
-    return new_settings
+    return Settings(**data)
 
 
 @api_router.get("/health")

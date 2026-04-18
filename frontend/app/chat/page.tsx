@@ -1,215 +1,252 @@
 "use client";
 
-import { useQuery, useMutation } from "@tanstack/react-query";
-import { api } from "@/lib/api";
-import { 
-  Send, 
-  Bot, 
-  User, 
-  Terminal, 
-  ExternalLink, 
-  Sparkles,
-  Zap,
+import { useMutation, useQuery } from "@tanstack/react-query";
+import {
+  AlertTriangle,
+  Bot,
   Cpu,
-  Brain,
+  ExternalLink,
   History,
-  AlertTriangle
+  Send,
+  Zap,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { useState, useRef, useEffect } from "react";
-import { motion, AnimatePresence } from "motion/react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import { motion } from "motion/react";
+
+import { ErrorBoundary, PageError } from "@/components/error-boundary";
+import { AGENT_STAGES, getStageLabel, type AgentStage } from "@/lib/constants";
+import { api, BASE } from "@/lib/api";
+import type { RunDetail, Tool, TraceEvent } from "@/lib/types";
+import { cn } from "@/lib/utils";
+
+type UserMessage = {
+  id: number;
+  role: "user";
+  user_input: string;
+};
+
+type ChatMessage = UserMessage | RunDetail;
+
+const EVENT_KIND_TO_STAGE: Record<string, AgentStage> = {
+  understand: "understand",
+  retrieve: "retrieve",
+  plan: "plan",
+  tool_call: "tool_result",
+  verify: "verify",
+  reflect: "reflection",
+  final: "final",
+  error: "error",
+};
 
 export default function ChatPage() {
-  const [messages, setMessages] = useState<any[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
+  const [liveEvents, setLiveEvents] = useState<TraceEvent[]>([]);
+  const [streamError, setStreamError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const { data: tools } = useQuery({
+  const { data: tools = [] } = useQuery({
     queryKey: ["tools"],
     queryFn: () => api.getTools(),
-  });
-
-  const { data: activeRun } = useQuery({
-    queryKey: ["active-run", currentRunId],
-    queryFn: () => api.getRun(currentRunId!),
-    enabled: !!currentRunId,
-    refetchInterval: (query) => {
-      // @ts-ignore
-      return query.state.data?.status === "running" ? 500 : false;
-    },
   });
 
   const dispatchMutation = useMutation({
     mutationFn: (text: string) => api.createRunAsync(text),
     onSuccess: (res) => {
       setCurrentRunId(res.run_id);
+      setLiveEvents([]);
+      setStreamError(null);
     },
   });
 
   useEffect(() => {
-    if (activeRun && activeRun.status !== "running") {
-      setMessages(prev => [
-        ...prev.filter(m => m.run_id !== activeRun.run_id),
-        activeRun
-      ]);
-      setCurrentRunId(null);
+    if (!currentRunId) {
+      return;
     }
-  }, [activeRun]);
+
+    const es = new EventSource(`${BASE}/runs/${currentRunId}/stream`);
+
+    es.onmessage = (event) => {
+      const data = JSON.parse(event.data) as TraceEvent | { done?: boolean; run?: RunDetail; error?: string };
+      if ("done" in data && data.done) {
+        if (data.run) {
+          setMessages((prev) => [...prev.filter((message) => !("run_id" in message) || message.run_id !== currentRunId), data.run!]);
+        }
+        setCurrentRunId(null);
+        setLiveEvents([]);
+        setStreamError(null);
+        es.close();
+        return;
+      }
+
+      if ("error" in data && data.error) {
+        setStreamError(data.error);
+        setCurrentRunId(null);
+        es.close();
+        return;
+      }
+
+      setLiveEvents((prev) => [...prev, data as TraceEvent]);
+    };
+
+    es.onerror = () => {
+      setStreamError("Live stream disconnected.");
+      es.close();
+    };
+
+    return () => es.close();
+  }, [currentRunId]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, activeRun]);
+  }, [messages, liveEvents]);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!input.trim() || !!currentRunId) return;
-    
-    const userMsg = { role: "user", user_input: input, id: Date.now() };
-    setMessages(prev => [...prev, userMsg]);
+  const handleSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!input.trim() || currentRunId) {
+      return;
+    }
+
+    const userMessage: UserMessage = {
+      role: "user",
+      user_input: input,
+      id: Date.now(),
+    };
+    setMessages((prev) => [...prev, userMessage]);
     dispatchMutation.mutate(input);
     setInput("");
   };
 
   return (
-    <div className="flex flex-col h-[calc(100vh-8rem)] relative animate-fade-in font-sans">
-      <div 
-        ref={scrollRef}
-        className="flex-1 overflow-y-auto pr-4 space-y-8 scroll-smooth scrollbar-hide"
-      >
-        {messages.length === 0 && !currentRunId && (
-          <EmptyState tools={tools} />
-        )}
+    <ErrorBoundary fallback={<PageError />}>
+      <div className="relative flex h-[calc(100vh-8rem)] flex-col animate-fade-in font-sans">
+        <div ref={scrollRef} className="scrollbar-hide flex-1 space-y-8 overflow-y-auto pr-4">
+          {messages.length === 0 && !currentRunId && <EmptyState tools={tools} />}
 
-        {messages.map((msg) => (
-          <div key={msg.run_id || msg.id}>
-            {msg.role === "user" ? (
-              <UserMessage text={msg.user_input} />
-            ) : (
-              <AgentMessage run={msg} />
-            )}
-          </div>
-        ))}
+          {messages.map((message) => (
+            <div key={"run_id" in message ? message.run_id : message.id}>
+              {"role" in message ? (
+                <UserMessage text={message.user_input} />
+              ) : (
+                <AgentMessage run={message} />
+              )}
+            </div>
+          ))}
 
-        {currentRunId && activeRun && (
-          <ThinkingIndicator run={activeRun} />
-        )}
-      </div>
+          {currentRunId && (
+            <ThinkingIndicator runId={currentRunId} liveEvents={liveEvents} streamError={streamError} />
+          )}
+        </div>
 
-      <div className="mt-8 relative">
-        <div className="absolute inset-x-0 -top-12 h-12 bg-gradient-to-t from-background to-transparent pointer-events-none" />
-        <form 
-          onSubmit={handleSubmit}
-          className="bg-glass rounded-2xl border border-white/10 p-2 flex items-end gap-2 shadow-2xl focus-within:ring-1 focus-within:ring-accent/50 transition-all"
-        >
-          <textarea 
-            rows={1}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSubmit(e);
-              }
-            }}
-            placeholder="Ask anything... (⌘+Enter to launch)"
-            className="flex-1 bg-transparent border-none outline-none p-3 text-sm resize-none scrollbar-hide min-h-[44px]"
-            disabled={!!currentRunId}
-          />
-          <button 
-            type="submit"
-            disabled={!input.trim() || !!currentRunId}
-            className="p-3 bg-accent text-accent-foreground rounded-xl disabled:opacity-20 transition-all active:scale-95"
+        <div className="relative mt-8">
+          <div className="pointer-events-none absolute inset-x-0 -top-12 h-12 bg-gradient-to-t from-background to-transparent" />
+          <form
+            onSubmit={handleSubmit}
+            className="flex items-end gap-2 rounded-2xl border border-white/10 bg-glass p-2 shadow-2xl transition-all focus-within:ring-1 focus-within:ring-accent/50"
           >
-            <Send className="w-5 h-5" />
-          </button>
-        </form>
-        <div className="flex justify-between px-2 mt-2">
-          <span className="text-[10px] text-muted font-bold uppercase tracking-widest">Local Intel: Ready</span>
-          <span className="text-[10px] text-muted font-bold uppercase tracking-widest">{input.length} Chars</span>
+            <textarea
+              rows={1}
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                  event.preventDefault();
+                  handleSubmit(event);
+                }
+              }}
+              placeholder="Ask anything... (Cmd/Ctrl+Enter to launch)"
+              className="scrollbar-hide min-h-[44px] flex-1 resize-none border-none bg-transparent p-3 text-sm outline-none"
+              disabled={Boolean(currentRunId)}
+            />
+            <button
+              type="submit"
+              disabled={!input.trim() || Boolean(currentRunId)}
+              className="rounded-xl bg-accent p-3 text-accent-foreground transition-all active:scale-95 disabled:opacity-20"
+            >
+              <Send className="h-5 w-5" />
+            </button>
+          </form>
+          <div className="mt-2 flex justify-between px-2">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-muted">Local Intel: Ready</span>
+            <span className="text-[10px] font-bold uppercase tracking-widest text-muted">{input.length} chars</span>
+          </div>
         </div>
       </div>
-    </div>
+    </ErrorBoundary>
   );
 }
 
-function EmptyState({ tools }: { tools: any }) {
+function EmptyState({ tools }: { tools: Tool[] }) {
   return (
-    <div className="flex flex-col items-center justify-center h-full text-center max-w-lg mx-auto space-y-6 pt-12">
-      <div className="w-16 h-16 bg-accent/10 rounded-full flex items-center justify-center animate-pulse">
-        <Bot className="w-8 h-8 text-accent" />
+    <div className="mx-auto flex h-full max-w-lg flex-col items-center justify-center space-y-6 pt-12 text-center">
+      <div className="flex h-16 w-16 items-center justify-center rounded-full bg-accent/10 animate-pulse">
+        <Bot className="h-8 w-8 text-accent" />
       </div>
       <div>
         <h2 className="text-xl font-bold">AgentOS Conversation</h2>
-        <p className="text-sm text-muted leading-relaxed mt-2">
-          Start a conversational research task. The agent will retrieve relevant history, search tools, and verify its logic before responding.
+        <p className="mt-2 text-sm leading-relaxed text-muted">
+          Start a conversational research task. The agent will retrieve relevant history, run tools, and verify before it answers.
         </p>
       </div>
 
-      {tools && (
-        <div className="w-full space-y-3">
-          <span className="text-[10px] uppercase font-bold text-muted tracking-widest">Active Toolset</span>
-          <div className="flex flex-wrap justify-center gap-2">
-            {tools.map((t: any) => (
-              <div key={t.name} className="px-3 py-1 bg-white/5 border border-border rounded-full text-[10px] font-bold text-accent uppercase">
-                {t.name}
-              </div>
-            ))}
-          </div>
+      <div className="w-full space-y-3">
+        <span className="text-[10px] font-bold uppercase tracking-widest text-muted">Active Toolset</span>
+        <div className="flex flex-wrap justify-center gap-2">
+          {tools.map((tool) => (
+            <div
+              key={tool.name}
+              className="rounded-full border border-border bg-white/5 px-3 py-1 text-[10px] font-bold uppercase text-accent"
+            >
+              {tool.name}
+            </div>
+          ))}
         </div>
-      )}
+      </div>
     </div>
   );
 }
 
 function UserMessage({ text }: { text: string }) {
   return (
-    <motion.div 
-      initial={{ opacity: 0, x: 10 }}
-      animate={{ opacity: 1, x: 0 }}
-      className="flex justify-end pr-4"
-    >
-      <div className="max-w-[80%] bg-accent/10 border border-accent/20 rounded-2xl px-5 py-3 text-sm text-foreground">
+    <motion.div initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} className="flex justify-end pr-4">
+      <div className="max-w-[80%] rounded-2xl border border-accent/20 bg-accent/10 px-5 py-3 text-sm text-foreground">
         {text}
       </div>
     </motion.div>
   );
 }
 
-function AgentMessage({ run }: { run: any }) {
+function AgentMessage({ run }: { run: RunDetail }) {
   return (
-    <motion.div 
-      initial={{ opacity: 0, scale: 0.98 }}
-      animate={{ opacity: 1, scale: 1 }}
-      className="flex gap-4"
-    >
-      <div className="w-8 h-8 bg-blue-400/10 rounded-lg flex items-center justify-center flex-shrink-0 mt-1">
-        <Bot className="w-5 h-5 text-blue-400" />
+    <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="flex gap-4">
+      <div className="mt-1 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-blue-400/10">
+        <Bot className="h-5 w-5 text-blue-400" />
       </div>
       <div className="flex-1 space-y-4">
         <div className="prose prose-invert prose-sm max-w-none">
-          <ReactMarkdown>{run.final_output || run.answer}</ReactMarkdown>
+          <ReactMarkdown>{run.final_output || "No output generated."}</ReactMarkdown>
         </div>
 
         <div className="flex items-center gap-4 text-[10px] font-bold uppercase tracking-widest text-muted">
-          <div className="flex items-center gap-1.5 px-2 py-0.5 bg-success/10 text-success rounded border border-success/30">
-            <Zap className="w-3 h-3" /> Score {(run.score || 0).toFixed(2)}
+          <div className="flex items-center gap-1.5 rounded border border-success/30 bg-success/10 px-2 py-0.5 text-success">
+            <Zap className="h-3 w-3" /> Score {(run.score || 0).toFixed(2)}
           </div>
-          <div className="flex items-center gap-1.5 px-2 py-0.5 bg-white/5 rounded border border-border">
-            <History className="w-3 h-3" /> {run.steps || run.total_steps || 0} Steps
+          <div className="flex items-center gap-1.5 rounded border border-border bg-white/5 px-2 py-0.5">
+            <History className="h-3 w-3" /> {run.transitions.length} stages
           </div>
-          <a 
+          <a
             href={`/runs/${run.run_id}`}
-            className="flex items-center gap-1.5 px-2 py-0.5 bg-accent/10 text-accent rounded border border-accent/30 hover:bg-accent/20 transition-all ml-auto outline-none"
+            className="ml-auto flex items-center gap-1.5 rounded border border-accent/30 bg-accent/10 px-2 py-0.5 text-accent transition-all hover:bg-accent/20"
           >
-            Trace Inspector <ExternalLink className="w-3 h-3" />
+            Trace Inspector <ExternalLink className="h-3 w-3" />
           </a>
         </div>
 
         {run.status === "timeout_synthesis" && (
-          <div className="flex items-center gap-2 text-[10px] text-gold font-bold uppercase bg-gold/10 border border-gold/20 px-2 py-1 rounded w-fit">
-            <AlertTriangle className="w-3 h-3" /> Partial Synthesis
+          <div className="flex w-fit items-center gap-2 rounded border border-gold/20 bg-gold/10 px-2 py-1 text-[10px] font-bold uppercase text-gold">
+            <AlertTriangle className="h-3 w-3" /> Partial Synthesis
           </div>
         )}
       </div>
@@ -217,60 +254,55 @@ function AgentMessage({ run }: { run: any }) {
   );
 }
 
-function ThinkingIndicator({ run }: { run: any }) {
-  const lastTransition = run.transitions?.[run.transitions.length - 1];
-  const stage = lastTransition?.stage || "starting";
-  const action = lastTransition?.action || {};
-  
-  // Extract specific details for better "streaming" feel
-  const currentGoal = action.goal || "Initializing research context...";
-  const toolName = action.tool;
-  const isTool = stage === "tool_result" || (stage === "plan" && action.type === "call_tool");
-
-  const phases = [
-    { label: "Understand", match: "understand" },
-    { label: "Retrieve", match: "memory" },
-    { label: "Plan", match: "plan" },
-    { label: "Act", match: "tool" },
-    { label: "Verify", match: "verify" },
-    { label: "Final", match: "final" },
-  ];
+function ThinkingIndicator({
+  runId,
+  liveEvents,
+  streamError,
+}: {
+  runId: string;
+  liveEvents: TraceEvent[];
+  streamError: string | null;
+}) {
+  const lastEvent = liveEvents[liveEvents.length - 1];
+  const normalizedStage = (
+    lastEvent ? EVENT_KIND_TO_STAGE[lastEvent.kind] ?? "understand" : "understand"
+  ) as AgentStage;
+  const currentLabel = streamError ? "Error" : getStageLabel(normalizedStage);
+  const activeIndex = AGENT_STAGES.indexOf(normalizedStage);
+  const toolName = lastEvent?.kind === "tool_call" ? lastEvent.name : undefined;
 
   return (
     <div className="flex gap-4">
-      <div className="w-8 h-8 bg-accent/10 rounded-lg flex items-center justify-center flex-shrink-0">
-        <Cpu className="w-5 h-5 text-accent animate-pulse" />
+      <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-accent/10">
+        <Cpu className="h-5 w-5 text-accent animate-pulse" />
       </div>
-      <div className="space-y-4 flex-1">
+      <div className="flex-1 space-y-4">
         <div className="space-y-1">
           <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold uppercase text-accent tracking-tighter animate-pulse uppercase">
-              {stage.replace("_", " ")}
+            <span className="text-[10px] font-bold uppercase tracking-tighter text-accent animate-pulse">
+              {currentLabel}
             </span>
-            {isTool && toolName && (
-              <span className="text-[10px] font-mono text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded border border-emerald-400/20">
-                TOOL: {toolName}
-              </span>
-            )}
+            <span className="text-[10px] font-mono uppercase text-muted">#{runId.slice(0, 8)}</span>
           </div>
-          <p className="text-xs text-muted leading-relaxed italic border-l-2 border-accent/20 pl-4 py-1">
-            {currentGoal}
+          <p className="border-l-2 border-accent/20 pl-4 py-1 text-xs italic leading-relaxed text-muted">
+            {streamError
+              ? streamError
+              : toolName
+                ? `Calling ${toolName} and waiting for the result.`
+                : `${currentLabel} phase in progress.`}
           </p>
         </div>
-        
+
         <div className="flex gap-1">
-          {phases.map((p) => {
-            const isActive = stage.includes(p.match);
-            return (
-              <div 
-                key={p.label} 
-                className={cn(
-                  "h-1 flex-1 rounded-full bg-white/5 transition-all duration-500",
-                  isActive ? "bg-accent shadow-[0_0_8px_rgba(125,211,252,0.5)]" : ""
-                )} 
-              />
-            );
-          })}
+          {AGENT_STAGES.filter((stage) => stage !== "reject").map((stage, index) => (
+            <div
+              key={stage}
+              className={cn(
+                "h-1 flex-1 rounded-full bg-white/5 transition-all duration-500",
+                index <= activeIndex && "bg-accent shadow-[0_0_8px_rgba(125,211,252,0.5)]",
+              )}
+            />
+          ))}
         </div>
       </div>
     </div>

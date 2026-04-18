@@ -2,7 +2,9 @@
 
 import { useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { ChevronRight, BrainCircuit, Wrench, Search, Zap, Code2, Copy, Check } from "lucide-react";
+import { BrainCircuit, ChevronRight, Code2, Search, Wrench, Zap } from "lucide-react";
+
+import { getStageLabel } from "@/lib/constants";
 
 interface TraceNodeProps {
   event: {
@@ -18,15 +20,15 @@ interface TraceNodeProps {
 
 export function TraceNode({ event, index }: TraceNodeProps) {
   const [expanded, setExpanded] = useState(false);
-  const [copied, setCopied] = useState(false);
 
   // Icon mapping
-  const Icon = {
+  const iconMap = {
     plan: BrainCircuit,
     tool: Wrench,
     memory: Search,
-    reflection: Zap
-  }[event.type as keyof typeof Icon] || Code2;
+    reflection: Zap,
+  };
+  const Icon = iconMap[event.type as keyof typeof iconMap] || Code2;
   
   // Color mapping
   const colorClass = {
@@ -43,16 +45,9 @@ export function TraceNode({ event, index }: TraceNodeProps) {
     reflection: "bg-rose-500/10"
   }[event.type] || "bg-gray-500/10";
 
-  const handleCopy = (e: React.MouseEvent, text: string) => {
-    e.stopPropagation();
-    navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
   const formatPayload = (payload: any) => {
     if (!payload) return "null";
-    if (typeof payload === 'object') return JSON.stringify(payload, null, 2);
+    if (typeof payload === "object") return JSON.stringify(payload, null, 2);
     return payload;
   };
 
@@ -80,7 +75,7 @@ export function TraceNode({ event, index }: TraceNodeProps) {
                   <Icon className="h-3 w-3" />
                 </div>
                 <span className="text-[11px] font-bold uppercase tracking-wider text-[#E4E4E5]">
-                  {event.type}
+                  {getStageLabel(event.type)}
                 </span>
              </div>
 

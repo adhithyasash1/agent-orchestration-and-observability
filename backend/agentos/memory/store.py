@@ -365,6 +365,28 @@ class MemoryStore:
                         )
                         embedding_id = new_emb_id
 
+        if kind in ("semantic", "experience") and salience >= 0.7 and embedding_id:
+            existing = self._find_similar(embedding_id, kind, threshold=0.92)
+            if existing:
+                with self._conn() as c:
+                    c.execute(
+                        """
+                        UPDATE memory_entries
+                        SET salience=?, verifier_score=?, updated_at=?
+                        WHERE id=?
+                        """,
+                        (
+                            max(_clamp_salience(salience), float(existing["salience"] or 0.0)),
+                            verifier_score if verifier_score is not None else existing["verifier_score"],
+                            now,
+                            existing["id"],
+                        ),
+                    )
+                    c.execute(
+                        "UPDATE system_state SET value = CAST(value AS INTEGER) + 1 WHERE key = 'memory_version'"
+                    )
+                return int(existing["id"])
+
         with self._conn() as c:
             cur = c.execute(
                 """
@@ -391,6 +413,42 @@ class MemoryStore:
             # Increment DB Memory Version
             c.execute("UPDATE system_state SET value = CAST(value AS INTEGER) + 1 WHERE key = 'memory_version'")
             return int(cur.lastrowid)
+
+    def _find_similar(self, embedding_id: str, kind: str, threshold: float) -> dict | None:
+        with self._conn() as c:
+            source = c.execute(
+                "SELECT vector FROM embeddings WHERE id=?",
+                (embedding_id,),
+            ).fetchone()
+            if not source or not source["vector"]:
+                return None
+            try:
+                source_vector = json.loads(source["vector"])
+            except Exception:
+                return None
+
+            rows = c.execute(
+                """
+                SELECT m.*, e.vector
+                FROM memory_entries m
+                JOIN embeddings e ON e.id = m.embedding_id
+                WHERE m.kind=? AND m.embedding_id IS NOT NULL
+                """,
+                (kind,),
+            ).fetchall()
+
+        best_match = None
+        best_score = threshold
+        for row in rows:
+            try:
+                candidate_vector = json.loads(row["vector"])
+            except Exception:
+                continue
+            similarity = sum(a * b for a, b in zip(source_vector, candidate_vector))
+            if similarity > best_score:
+                best_score = similarity
+                best_match = dict(row)
+        return best_match
 
     def upsert_entity(self, name: str, entity_type: str | None = None, description: str | None = None, meta: dict | None = None) -> str:
         """Upsert a knowledge graph entity."""
@@ -564,8 +622,19 @@ class MemoryStore:
         if not settings.enable_embeddings and mode in ("semantic", "hybrid"):
             mode = "fts" if self._fts_available else "like"
 
-        # 1. Retrieval Cache Lookup
-        cache_key = hashlib.sha256(f"{query}:{mode}:{self._get_memory_version()}".encode("utf-8")).hexdigest()
+        cache_key = hashlib.sha256(
+            json.dumps(
+                {
+                    "query": query,
+                    "mode": mode,
+                    "kinds": normalized_kinds,
+                    "min_salience": min_salience,
+                    "include_expired": include_expired,
+                    "memory_version": self._get_memory_version(),
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
         if settings.retrieval_cache_enabled:
             with self._conn() as c:
                 row = c.execute("SELECT result_ids FROM retrieval_cache WHERE key = ?", (cache_key,)).fetchone()
@@ -582,53 +651,20 @@ class MemoryStore:
                     # Score and return
                     return self._score_candidates(docs, query)[:k]
 
-        candidates = []
-        if mode == "fts":
-            candidates = self._fts_search(query, limit, normalized_kinds, min_salience, include_expired)
-        elif mode == "like":
-            candidates = self._like_search(query, limit, normalized_kinds, min_salience, include_expired)
-        elif mode == "semantic":
-            candidates = self._semantic_search(query, limit, normalized_kinds, min_salience, include_expired)
-        elif mode == "hybrid":
-            fts_cand = self._fts_search(query, limit, normalized_kinds, min_salience, include_expired)
-            sem_cand = self._semantic_search(query, limit, normalized_kinds, min_salience, include_expired)
-            
-            # Union deduplicate
-            seen_ids = set()
-            hybrid_cand = []
-            for row in fts_cand + sem_cand:
-                if row["id"] not in seen_ids:
-                    seen_ids.add(row["id"])
-                    hybrid_cand.append(row)
-                    
-            docs = self._score_candidates([dict(r) for r in hybrid_cand], query)
-            
-            # Sub-sort semantic priorities explicitly before reranking
-            for doc in docs:
-                kind_bonus = 1.0
-                if doc.get("kind") == "experience": kind_bonus = 1.2
-                if doc.get("kind") == "failure": kind_bonus = 1.1
-                doc["utility_score"] = float(doc.get("utility_score", 0.0)) * kind_bonus
-
-            if settings.enable_reranker:
-                ranked_docs = rerank(query, docs, top_n=settings.rerank_top_n)
-                candidates = ranked_docs
-            else:
-                candidates = docs
-
-        ranked = candidates if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict) and "utility_score" in candidates[0] else self._score_candidates([dict(r) for r in candidates], query)
-        
-        # Sort if not already handled by Reranker
-        if mode != "hybrid" or not settings.enable_reranker:
-            ranked.sort(
-                key=lambda item: (
-                    item.get("utility_score", 0.0),
-                    item.get("salience", 0.0),
-                    item.get("created_at", 0.0),
-                ),
-                reverse=True,
+        raw_candidates: list[dict] = []
+        for spec_kinds, spec_min_salience in self._search_specs(normalized_kinds, min_salience):
+            raw_candidates.extend(
+                self._retrieve_candidates_for_mode(
+                    query,
+                    mode,
+                    limit,
+                    spec_kinds,
+                    spec_min_salience,
+                    include_expired,
+                )
             )
-            
+
+        ranked = self._rank_candidates(self._dedupe_candidates(raw_candidates), query, mode)
         final_k = ranked[:k]
 
         # 2. Cache Results
@@ -644,6 +680,85 @@ class MemoryStore:
                 )
 
         return final_k
+
+    def _search_specs(
+        self,
+        kinds: tuple[str, ...],
+        min_salience: float | None,
+    ) -> list[tuple[tuple[str, ...], float | None]]:
+        if "failure" not in kinds:
+            return [(kinds, min_salience)]
+
+        non_failure = tuple(kind for kind in kinds if kind != "failure")
+        specs: list[tuple[tuple[str, ...], float | None]] = []
+        if non_failure:
+            specs.append((non_failure, min_salience))
+        specs.append((("failure",), 0.0))
+        return specs
+
+    def _retrieve_candidates_for_mode(
+        self,
+        query: str,
+        mode: str,
+        limit: int,
+        kinds: tuple[str, ...],
+        min_salience: float | None,
+        include_expired: bool,
+    ) -> list[dict]:
+        if mode == "fts":
+            return [dict(r) for r in self._fts_search(query, limit, kinds, min_salience, include_expired)]
+        if mode == "like":
+            return [dict(r) for r in self._like_search(query, limit, kinds, min_salience, include_expired)]
+        if mode == "semantic":
+            return [dict(r) for r in self._semantic_search(query, limit, kinds, min_salience, include_expired)]
+        if mode == "hybrid":
+            return [
+                *[dict(r) for r in self._fts_search(query, limit, kinds, min_salience, include_expired)],
+                *[dict(r) for r in self._semantic_search(query, limit, kinds, min_salience, include_expired)],
+            ]
+        return []
+
+    def _dedupe_candidates(self, candidates: list[dict]) -> list[dict]:
+        merged: dict[int, dict] = {}
+        for candidate in candidates:
+            row = dict(candidate)
+            existing = merged.get(int(row["id"]))
+            if existing is None:
+                merged[int(row["id"])] = row
+                continue
+
+            if row.get("semantic_similarity", -1.0) > existing.get("semantic_similarity", -1.0):
+                existing["semantic_similarity"] = row["semantic_similarity"]
+            if row.get("fts_rank") is not None:
+                if existing.get("fts_rank") is None or float(row["fts_rank"]) < float(existing["fts_rank"]):
+                    existing["fts_rank"] = row["fts_rank"]
+        return list(merged.values())
+
+    def _rank_candidates(self, candidates: list[dict], query: str, mode: str) -> list[dict]:
+        if not candidates:
+            return []
+
+        ranked = self._score_candidates([dict(r) for r in candidates], query)
+        if mode == "hybrid":
+            for doc in ranked:
+                kind_bonus = 1.0
+                if doc.get("kind") == "experience":
+                    kind_bonus = 1.2
+                if doc.get("kind") == "failure":
+                    kind_bonus = 1.1
+                doc["utility_score"] = float(doc.get("utility_score", 0.0)) * kind_bonus
+            if settings.enable_reranker:
+                return rerank(query, ranked, top_n=settings.rerank_top_n)
+
+        ranked.sort(
+            key=lambda item: (
+                item.get("utility_score", 0.0),
+                item.get("salience", 0.0),
+                item.get("created_at", 0.0),
+            ),
+            reverse=True,
+        )
+        return ranked
 
     def _get_memory_version(self) -> int:
         with self._conn() as c:
@@ -802,15 +917,21 @@ class MemoryStore:
         return int(row["n"])
 
     def stats(self) -> dict:
+        now = time.time()
         with self._conn() as c:
             total = int(c.execute("SELECT COUNT(*) AS n FROM memory_entries").fetchone()["n"])
             rows = c.execute(
                 "SELECT kind, COUNT(*) AS n FROM memory_entries GROUP BY kind"
             ).fetchall()
+            expiring_soon = int(c.execute(
+                "SELECT COUNT(*) AS n FROM memory_entries "
+                "WHERE expires_at IS NOT NULL AND expires_at < ?",
+                (now + 3600,),
+            ).fetchone()["n"])
         by_kind = {kind: 0 for kind in MEMORY_KINDS}
         for row in rows:
             by_kind[row["kind"]] = int(row["n"])
-        return {"count": total, "by_kind": by_kind}
+        return {"count": total, "by_kind": by_kind, "expiring_within_1h": expiring_soon}
 
     def clear(self, kinds: Iterable[str] | None = None) -> None:
         normalized_kinds = tuple(_normalize_kind(kind) for kind in kinds) if kinds else ()

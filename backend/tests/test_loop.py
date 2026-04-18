@@ -124,3 +124,32 @@ async def test_loop_refuses_gibberish_without_promoting_durable_memory(llm, tool
     stats = memory.stats()["by_kind"]
     assert stats["episodic"] == 0
     assert stats["semantic"] == 0
+
+
+async def test_tool_error_observation_summary_reflects_error(llm, tools, memory, traces, settings):
+    result = await run_agent(
+        "Calculate 2 +",
+        llm=llm, tools=tools, memory=memory, traces=traces, config=settings,
+    )
+    assert result.tool_calls
+    assert result.tool_calls[0]["status"] == "error"
+    assert any(
+        token in result.tool_calls[0]["observation_summary"].lower()
+        for token in ("failed", "error")
+    )
+
+
+async def test_cleanup_not_called_when_memory_disabled(llm, tools, memory, traces, settings, monkeypatch):
+    calls = {"count": 0}
+
+    def fake_cleanup(*args, **kwargs):
+        calls["count"] += 1
+        return 0
+
+    monkeypatch.setattr(memory, "cleanup_expired", fake_cleanup)
+    settings.enable_memory = False
+    await run_agent(
+        "What is the capital of France?",
+        llm=llm, tools=tools, memory=memory, traces=traces, config=settings,
+    )
+    assert calls["count"] == 0

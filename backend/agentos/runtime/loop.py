@@ -17,6 +17,7 @@ in `run()` and the helpers below it.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,9 +34,11 @@ from ..memory.salience import (
 )
 from ..memory.store import MemoryStore
 from ..tools.registry import ToolRegistry
-from .context_packer import PackedContext, pack_context
+from .context_packer import PackedContext, pack_context, _is_research_task
 from .planner import PlanDecision, plan_next_step
 from .trace import RunTransition, TraceEvent, TraceStore, Timer
+
+logger = logging.getLogger("agentos")
 
 
 @dataclass
@@ -112,6 +115,7 @@ class _AgentRun:
         self.traces = traces
         self.cfg = cfg.model_copy(deep=True)
         self.expected = expected
+        self._is_research = _is_research_task(user_input)
 
         if run_id:
             self.run_id = run_id
@@ -153,17 +157,13 @@ class _AgentRun:
     # Orchestration
     # ------------------------------------------------------------------
     async def run(self) -> AgentResult:
-        # Start of run: Clean up expired memory but exclude THIS run's potentially fresh data
-        self.memory.cleanup_expired(exclude_run_id=self.run_id)
+        if self.cfg.enable_memory:
+            self.memory.cleanup_expired(exclude_run_id=self.run_id)
 
         if not self.user_input or not self.user_input.strip():
             return self._finalize_rejected()
 
         try:
-            # Safe Lifecycle: Clean up expired scratch/failed memories before start.
-            if self.cfg.enable_memory:
-                self.memory.cleanup_expired()
-                
             self._stash_user_input()
             self._emit_understand()
             self._retrieve()
@@ -253,15 +253,19 @@ class _AgentRun:
         return self._transition_step
 
     def _pack(self) -> PackedContext:
-        # Prune and deduplicate tool results to keep context clean
-        # Rule: Only keep the most recent result for a specific tool call signature
-        unique_results = {}
+        unique_results: dict[tuple[Any, str], dict] = {}
         for res in self.tool_results:
             key = (res.get("tool"), str(res.get("tool_args")))
+            if key in unique_results:
+                logger.debug(
+                    "Dedup: overwriting prior result for tool=%s args=%s",
+                    res.get("tool"),
+                    res.get("tool_args"),
+                )
             unique_results[key] = res
-            
+
         deduped = list(unique_results.values())
-        
+
         return pack_context(
             user_input=self.user_input,
             memory_hits=self.memory_hits,
@@ -274,6 +278,7 @@ class _AgentRun:
             scratchpad_ratio=self.cfg.context_scratchpad_ratio,
             tool_ratio=self.cfg.context_tool_ratio,
             failed_attempts=self.failed_attempts,
+            is_research_task=self._is_research,
         )
 
     def _current_state(self, iteration: int) -> dict[str, Any]:
@@ -491,7 +496,7 @@ class _AgentRun:
         with Timer() as t:
             try:
                 result = await self.tools.call(
-                    decision.tool, 
+                    decision.tool,
                     decision.tool_args or {},
                     context={"memory": self.memory, "config": self.cfg}
                 )
@@ -503,13 +508,19 @@ class _AgentRun:
                     "observation_summary": "The tool execution failed due to a backend exception."
                 }
         self.total_latency += t.ms
+        actual_summary = decision.observation_summary
+        if result["status"] != "ok":
+            actual_summary = (
+                f"Tool failed: {result.get('error', result.get('output', 'unknown error'))[:200]}"
+            )
 
         tool_result = {
             "tool": decision.tool,
+            "tool_args": decision.tool_args or {},
             "args": decision.tool_args,
             "status": result["status"],
             "output": result.get("output", ""),
-            "observation_summary": decision.observation_summary,
+            "observation_summary": actual_summary,
             "iteration": iteration + 1,
             "latency_ms": t.ms,
         }
@@ -796,7 +807,10 @@ class _AgentRun:
         is_trustworthy = False
         promotion_mode = "none"
         
-        if self.cfg.enable_llm_judge:
+        if self.verification.get("mode") == "expected":
+            is_trustworthy = self.score >= self.cfg.eval_pass_threshold
+            promotion_mode = "expected"
+        elif self.cfg.enable_llm_judge:
             # Judge Path: Explicitly verified by the verifier LLM.
             is_trustworthy = (
                 self.score >= self.cfg.eval_pass_threshold

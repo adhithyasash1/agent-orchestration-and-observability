@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
+import { getStageLabel } from "@/lib/constants";
 import type { RunDetail as RunDetailType } from "@/lib/types";
 import { formatScore, formatWhen, scoreTone } from "@/lib/utils";
 
@@ -85,8 +86,8 @@ export function RunDetail({
                   className="rounded-[20px] border border-white/10 bg-[#09111d] p-4"
                 >
                   <summary className="cursor-pointer list-none text-sm text-white">
-                    {transition.step}. {transition.stage} • status {transition.status ?? "n/a"} • reward{" "}
-                    {transition.reward ?? "n/a"}
+                    {transition.step}. {getStageLabel(transition.stage)} • status {transition.status ?? "n/a"} • score{" "}
+                    {formatScore(transition.score)}
                   </summary>
                   <pre className="mt-3 overflow-x-auto whitespace-pre-wrap text-xs text-muted">
                     {JSON.stringify(

@@ -2,6 +2,7 @@
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import Link from "next/link";
 import { 
   Database, 
   Search, 
@@ -13,20 +14,23 @@ import {
   Info,
   Layers,
   Activity,
-  ChevronRight
+  ChevronRight,
+  AlertTriangle
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { useStore } from "@/lib/store";
+import { ErrorBoundary, PageError } from "@/components/error-boundary";
+import type { MemoryKind } from "@/lib/types";
 
-const KINDS = ["working", "episodic", "semantic", "experience", "style", "failure"];
+const KINDS: MemoryKind[] = ["working", "episodic", "semantic", "experience", "style", "failure"];
 
 export default function MemoryConsolePage() {
   const queryClient = useQueryClient();
   const { showToast } = useStore();
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedKinds, setSelectedKinds] = useState<string[]>([]);
+  const [selectedKinds, setSelectedKinds] = useState<MemoryKind[]>([]);
 
   const { data: stats } = useQuery({
     queryKey: ["memory-stats"],
@@ -52,128 +56,130 @@ export default function MemoryConsolePage() {
     },
   });
 
-  const toggleKind = (kind: string) => {
+  const toggleKind = (kind: MemoryKind) => {
     setSelectedKinds(prev => 
       prev.includes(kind) ? prev.filter(k => k !== kind) : [...prev, kind]
     );
   };
 
   return (
-    <div className="space-y-10 animate-fade-in pb-20">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Memory Ecosystem</h1>
-          <p className="text-muted mt-1">Cross-tier storage for experience, experience and semantic grounding.</p>
+    <ErrorBoundary fallback={<PageError />}>
+      <div className="space-y-10 animate-fade-in pb-20">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight">Memory Ecosystem</h1>
+            <p className="text-muted mt-1">Cross-tier storage for experience, experience and semantic grounding.</p>
+          </div>
+          <div className="flex items-center gap-4 px-4 py-2 bg-glass rounded-xl border border-white/10">
+            <Layers className="w-4 h-4 text-purple-400" />
+            <span className="text-sm font-mono font-bold">{stats?.count || 0} Total Vectors</span>
+          </div>
         </div>
-        <div className="flex items-center gap-4 px-4 py-2 bg-glass rounded-xl border border-white/10">
-          <Layers className="w-4 h-4 text-purple-400" />
-          <span className="text-sm font-mono font-bold">{stats?.count || 0} Total Vectors</span>
-        </div>
-      </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-        {KINDS.map((kind) => (
-          <MemoryTierCard 
-            key={kind}
-            kind={kind}
-            count={stats?.by_kind[kind] || 0}
-            active={selectedKinds.includes(kind)}
-            onClick={() => toggleKind(kind)}
-          />
-        ))}
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-        <div className="lg:col-span-8 space-y-6">
-          <div className="relative">
-            <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-              <Search className="w-5 h-5 text-muted" />
-            </div>
-            <input 
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Query semantic memory or search experiences..."
-              className="w-full bg-background/50 border border-border rounded-xl pl-12 pr-4 py-4 text-sm focus:ring-1 focus:ring-accent outline-none"
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+          {KINDS.map((kind) => (
+            <MemoryTierCard 
+              key={kind}
+              kind={kind}
+              count={stats?.by_kind[kind] || 0}
+              active={selectedKinds.includes(kind)}
+              onClick={() => toggleKind(kind)}
             />
-            {isSearching && (
-              <div className="absolute right-4 top-1/2 -translate-y-1/2">
-                <div className="w-4 h-4 border-2 border-accent border-t-transparent rounded-full animate-spin" />
-              </div>
-            )}
-          </div>
-
-          <div className="space-y-4">
-            <div className="flex items-center justify-between px-2">
-              <h3 className="text-xs font-bold text-muted uppercase tracking-widest">Search Results</h3>
-              <div className="flex gap-2">
-                {KINDS.map(kind => (
-                  <button 
-                    key={kind}
-                    onClick={() => toggleKind(kind)}
-                    className={cn(
-                      "px-3 py-1 rounded-full text-[10px] font-bold uppercase border transition-all",
-                      selectedKinds.includes(kind) ? "bg-accent border-accent text-accent-foreground" : "bg-white/5 border-border text-muted hover:text-foreground"
-                    )}
-                  >
-                    {kind}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="space-y-3">
-              <AnimatePresence mode="popLayout">
-                {searchResults?.results?.map((res: any) => (
-                  <SearchResultCard key={res.id} result={res} />
-                ))}
-                {!isSearching && searchQuery.length > 2 && searchResults?.results?.length === 0 && (
-                  <div className="p-12 text-center text-muted text-sm bg-glass rounded-2xl border border-dashed border-border">
-                    No results found in selected memory tiers for your query.
-                  </div>
-                )}
-              </AnimatePresence>
-            </div>
-          </div>
+          ))}
         </div>
 
-        <div className="lg:col-span-4 space-y-8">
-          <section className="bg-glass rounded-2xl p-6 border border-border space-y-6">
-            <h3 className="text-sm font-bold flex items-center gap-2">
-              <Activity className="w-4 h-4 text-accent" />
-              Memory Hygiene
-            </h3>
-            <div className="space-y-5">
-              <HygieneAction 
-                label="Clear Working Tier" 
-                description="Removes intermediate step data from current sessions." 
-                onPurge={() => purgeMutation.mutate("working")}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+          <div className="lg:col-span-8 space-y-6">
+            <div className="relative">
+              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                <Search className="w-5 h-5 text-muted" />
+              </div>
+              <input 
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Query semantic memory or search experiences..."
+                className="w-full bg-background/50 border border-border rounded-xl pl-12 pr-4 py-4 text-sm focus:ring-1 focus:ring-accent outline-none"
               />
-              <HygieneAction 
-                label="Vacuum Semantic" 
-                description="Compresses vector index and removes orphaned nodes." 
-                onPurge={() => purgeMutation.mutate("semantic")}
-              />
-              <HygieneAction 
-                label="Purge Experience" 
-                description="Wipes all agent journey experiences. Warning: Irreversible." 
-                danger
-                onPurge={() => purgeMutation.mutate("experience")}
-              />
+              {isSearching && (
+                <div className="absolute right-4 top-1/2 -translate-y-1/2">
+                  <div className="w-4 h-4 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+                </div>
+              )}
             </div>
-          </section>
 
-          <section className="bg-glass rounded-2xl p-6 border border-border space-y-4">
-            <h3 className="text-sm font-bold flex items-center gap-2">
-              <Info className="w-4 h-4 text-purple-400" />
-              Tiering Logic
-            </h3>
-            <p className="text-xs text-muted leading-relaxed">
-              AgentOS uses a tiered memory architecture. Items with verifier scores {">"} 0.7 are promoted to <span className="text-accent">Episodic</span>. Successfully synthesized insights enter <span className="text-purple-400">Semantic</span> long-term storage.
-            </p>
-          </section>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between px-2">
+                <h3 className="text-xs font-bold text-muted uppercase tracking-widest">Search Results</h3>
+                <div className="flex gap-2">
+                  {KINDS.map(kind => (
+                    <button 
+                      key={kind}
+                      onClick={() => toggleKind(kind)}
+                      className={cn(
+                        "px-3 py-1 rounded-full text-[10px] font-bold uppercase border transition-all",
+                        selectedKinds.includes(kind) ? "bg-accent border-accent text-accent-foreground" : "bg-white/5 border-border text-muted hover:text-foreground"
+                      )}
+                    >
+                      {kind}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <AnimatePresence mode="popLayout">
+                  {searchResults?.results?.map((res: any) => (
+                    <SearchResultCard key={res.id} result={res} />
+                  ))}
+                  {!isSearching && searchQuery.length > 2 && searchResults?.results?.length === 0 && (
+                    <div className="p-12 text-center text-muted text-sm bg-glass rounded-2xl border border-dashed border-border">
+                      No results found in selected memory tiers for your query.
+                    </div>
+                  )}
+                </AnimatePresence>
+              </div>
+            </div>
+          </div>
+
+          <div className="lg:col-span-4 space-y-8">
+            <section className="bg-glass rounded-2xl p-6 border border-border space-y-6">
+              <h3 className="text-sm font-bold flex items-center gap-2">
+                <Activity className="w-4 h-4 text-accent" />
+                Memory Hygiene
+              </h3>
+              <div className="space-y-5">
+                <HygieneAction 
+                  label="Clear Working Tier" 
+                  description="Removes intermediate step data from current sessions." 
+                  onPurge={() => purgeMutation.mutate("working")}
+                />
+                <HygieneAction 
+                  label="Vacuum Semantic" 
+                  description="Compresses vector index and removes orphaned nodes." 
+                  onPurge={() => purgeMutation.mutate("semantic")}
+                />
+                <HygieneAction 
+                  label="Purge Experience" 
+                  description="Wipes all agent journey experiences. Warning: Irreversible." 
+                  danger
+                  onPurge={() => purgeMutation.mutate("experience")}
+                />
+              </div>
+            </section>
+
+            <section className="bg-glass rounded-2xl p-6 border border-border space-y-4">
+              <h3 className="text-sm font-bold flex items-center gap-2">
+                <Info className="w-4 h-4 text-purple-400" />
+                Tiering Logic
+              </h3>
+              <p className="text-xs text-muted leading-relaxed">
+                AgentOS uses a tiered memory architecture. Items with verifier scores {">"} 0.7 are promoted to <span className="text-accent">Episodic</span>. Successfully synthesized insights enter <span className="text-purple-400">Semantic</span> long-term storage.
+              </p>
+            </section>
+          </div>
         </div>
       </div>
-    </div>
+    </ErrorBoundary>
   );
 }
 
@@ -282,26 +288,5 @@ function HygieneAction({ label, description, onPurge, danger }: any) {
       <p className="text-[10px] text-muted leading-relaxed">{description}</p>
       <div className="h-px bg-border w-full" />
     </div>
-  );
-}
-
-function AlertTriangle(props: any) {
-  return (
-    <svg 
-      xmlns="http://www.w3.org/2000/svg" 
-      width="24" 
-      height="24" 
-      viewBox="0 0 24 24" 
-      fill="none" 
-      stroke="currentColor" 
-      strokeWidth="2" 
-      strokeLinecap="round" 
-      strokeLinejoin="round" 
-      {...props}
-    >
-      <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
-      <path d="M12 9v4" />
-      <path d="M12 17h.01" />
-    </svg>
   );
 }

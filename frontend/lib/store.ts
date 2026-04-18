@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { AgentConfig } from "./types";
+import type { ConfigResponse } from "./types";
 
 interface UIState {
   activeRunId: string | null;
@@ -9,8 +9,8 @@ interface UIState {
   isCommandPaletteOpen: boolean;
   setCommandPaletteOpen: (open: boolean) => void;
   
-  settingsCache: AgentConfig | null;
-  setSettingsCache: (config: AgentConfig | null) => void;
+  settingsCache: ConfigResponse | null;
+  setSettingsCache: (config: ConfigResponse | null) => void;
   
   lastPurgeTs: number | null;
   recordPurge: () => void;
@@ -51,3 +51,5 @@ export const useStore = create<UIState>()(
     }
   )
 );
+
+export const useAppStore = useStore;
