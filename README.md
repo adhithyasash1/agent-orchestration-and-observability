@@ -1,137 +1,71 @@
-# 🌌 AgentOS: Precision Agent Orchestration & Observability
+# agentos: precision agent orchestration
 
-![Architecture](https://img.shields.io/badge/Architecture-Modular-blueviolet?style=for-the-badge)
-![Next.js](https://img.shields.io/badge/Frontend-Next.js%2015-black?style=for-the-badge)
-![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?style=for-the-badge)
-![SQLite/Neo4j](https://img.shields.io/badge/Storage-SQLite%20%2F%20Neo4j-003B57?style=for-the-badge)
-
-AgentOS is a high-performance orchestration framework designed for developers who need more than just a chat loop. It provides a robust, observability-first environment for building and debugging autonomous agents with multi-tiered memory, deep trace inspection, and modular tool integration.
+agentos is a high-performance framework for building agents that actually work. it focuses on observability, tiered memory, and modular tooling so you can see exactly what your agent is thinking, doing, and retrieving.
 
 ---
 
-## 🚀 Core Features
+## what’s inside
 
-### 🧠 3-Tier Layered Memory
-AgentOS manages memory across distinct tiers to ensure agents have the right context at the right time:
-- **Working Memory**: Short-lived observations and scratch state (TTL-based).
-- **Episodic Memory**: Verified task episodes tied to specific runs.
-- **Semantic Memory**: Durable, verified facts and knowledge graph entities.
-- **Experience Layer**: Learned success trajectories and failure avoidance patterns.
-
-### 🔍 Deep Trace Observability
-Every agent interaction is captured as a structured trace.
-- **Trace Events**: `understand` ➔ `plan` ➔ `tool_call` ➔ `verify` ➔ `reflect`.
-- **Score Annotation**: Automated evaluation of every step with verifier feedback.
-- **Replay-Ready**: Every transition is logged with prompt versions and context IDs for offline debugging and RL training.
-
-### 🛠️ Modular Tool Ecosystem
-- **MCP Integration**: First-class support for the Model Context Protocol (MCP).
-- **Hardened Workspace**: Safe, sandboxed file manipulation and local traversal.
-- **Registry-First**: Adding new tools is as simple as defining a Python function with type hints.
-
-### 💻 Modern Operator Console
-A premium Next.js 15 dashboard built with Shadcn UI and Tailwind CSS for:
-- Live chat and trace visualization.
-- Semantic memory exploration.
-- Detailed run evaluation and benchmarking.
+- **3-tier memory**: working (short-term), episodic (verified runs), and semantic (durable facts). includes a knowledge graph for entities and relations.
+- **deep traces**: every step is captured (understand -> plan -> tool -> verify). scores are annotated live so you can debug the "why" behind an answer.
+- **modular tools**: supports mcp (model context protocol) and a sandboxed workspace for safe local file ops.
+- **operator console**: a clean next.js 15 dashboard to chat with your agent and inspect memory.
 
 ---
 
-## 🏗️ Architecture
+## architecture
 
 ```mermaid
 graph TD
-    User([User]) <--> Frontend[Next.js 15 Console]
-    Frontend <--> API[FastAPI Backend]
-    
-    subgraph Backend [AgentOS Core]
-        API --> Loop[Orchestration Loop]
-        Loop --> Planner[LLM Planner]
-        Loop --> Registry[Tool Registry]
-        Loop --> Memory[Tiered Memory Store]
-        
-        Registry --> MCP[MCP Servers]
-        Registry --> Workspace[Workspace Mgr]
-        
-        Memory --> SQLite[(SQLite + FTS5)]
-        Memory --> Neo4j[(Neo4j Graph)]
-    end
-    
-    subgraph LLM [Intelligence]
-        Planner --> Ollama[Ollama / Cloud LLM]
-        Planner --> Embeddings[Embedding Engine]
-    end
+    user([user]) <--> ui[nextjs console]
+    ui <--> api[fastapi backend]
+    api --> loop[orchestrator]
+    loop --> memory[(tiered memory)]
+    loop --> tools[tool registry]
+    tools --> mcp[mcp servers]
 ```
 
 ---
 
-## 🛠️ Setup Guide
+## get it running
 
-### 1. Prerequisites
-- **Python**: 3.10 or higher.
-- **Node.js**: 18 or higher (for the frontend).
-- **Ollama**: (Optional) For local LLM execution.
-
-### 2. Backend Installation
+### backend
 ```bash
-# Create and activate virtual environment
 python -m venv venv
 source venv/bin/activate
-
-# Install dependencies
 pip install -e .
 pip install -r backend/requirements.txt
-
-# Configure environment
-cp .env.example .env
-# Edit .env with your LLM configuration
+cp .env.example .env # flip the llm settings here
 ```
 
-### 3. Frontend Installation
+### frontend
 ```bash
 cd frontend
 npm install
 ```
 
----
-
-## 🏃 Getting Started
-
-### Start the Backend
-```bash
-# From the root directory
-venv/bin/python -m agentos.main
-```
-
-### Start the Frontend
-```bash
-cd frontend
-npm run dev
-```
-The console will be available at `http://localhost:3000`.
+### spin up
+1. **backend**: `venv/bin/python -m agentos.main`
+2. **frontend**: `cd frontend && npm run dev`
+-> check it at `http://localhost:3000`
 
 ---
 
-## ⚖️ Evaluation & Benchmarking
-
-AgentOS includes a built-in evaluation pipeline to measure agent performance across diverse tasks:
-- **Slices**: Retrieval, Tool-use, Multi-step, Long-context, and Refusal-safety.
-- **Metrics**: Success rate, tool precision/recall, context utility, and reflection ROI.
-- **Ablations**: Test the impact of memory, planning, or reflection by toggling features in real-time.
+## eval & benchmark
+run tasks across retrieval, tool-use, and multi-step slices. agents are scored on success rate, tool precision, and reflection roi. use these to test if your memory or planning changes actually improve performance.
 
 ---
 
-## ⚙️ Key Environment Variables
+## main settings (`.env`)
 
-| Variable | Default | Description |
-|----------|---------|-------------|
+| variable | default | notes |
+|---|---|---|
 | `AGENTOS_LLM_BACKEND` | `mock` | `mock` or `ollama` |
-| `AGENTOS_DB_PATH` | `./data/agentos.db` | SQLite database path |
-| `AGENTOS_MAX_STEPS` | `4` | Max iterations per task |
-| `AGENTOS_ENABLE_MEMORY` | `true` | Toggle tiered memory system |
-| `AGENTOS_ENABLE_OTEL` | `false` | Enable OpenTelemetry tracing |
+| `AGENTOS_DB_PATH` | `./data/agentos.db` | sqlite path |
+| `AGENTOS_MAX_STEPS` | `4` | loop limit |
+| `AGENTOS_ENABLE_MEMORY` | `true` | toggle tiered storage |
 
 ---
 
-## 📜 License
-Personal project scaffolding. Adapt and build as you like.
+## license
+personal project. use it, break it, build it.
