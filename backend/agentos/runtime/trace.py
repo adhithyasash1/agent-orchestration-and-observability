@@ -318,12 +318,90 @@ class TraceStore:
         finally:
             tmp_conn.close()
 
+    def get_events_since(self, run_id: str, last_id: int) -> list[dict]:
+        """Return all trace_events for run_id with id > last_id, ordered by id."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM trace_events WHERE run_id=? AND id>? ORDER BY id",
+                (run_id, last_id),
+            ).fetchall()
+        return [_loads_row(dict(r)) for r in rows]
+
+    def _run_metrics(self, conn: sqlite3.Connection, run_ids: list[str]) -> dict[str, dict[str, Any]]:
+        metrics = {
+            run_id: {
+                "reflection_count": 0,
+                "tool_call_count": 0,
+                "tool_call_success_count": 0,
+                "initial_score": None,
+            }
+            for run_id in run_ids
+        }
+        if not run_ids:
+            return metrics
+
+        placeholders = ",".join("?" for _ in run_ids)
+        rows = conn.execute(
+            f"""
+            SELECT run_id, stage, score, status
+            FROM run_transitions
+            WHERE run_id IN ({placeholders})
+            ORDER BY id
+            """,
+            run_ids,
+        ).fetchall()
+        for row in rows:
+            metric = metrics[row["run_id"]]
+            if row["stage"] == "reflection":
+                metric["reflection_count"] += 1
+            elif row["stage"] == "tool_result":
+                metric["tool_call_count"] += 1
+                if row["status"] == "ok":
+                    metric["tool_call_success_count"] += 1
+            elif row["stage"] == "verify" and metric["initial_score"] is None and row["score"] is not None:
+                metric["initial_score"] = float(row["score"])
+        return metrics
+
+    def _hydrate_run_row(
+        self,
+        row: sqlite3.Row | dict[str, Any],
+        metrics: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        data = _loads_row(dict(row))
+        for key in ("flags", "user_feedback"):
+            value = data.get(key)
+            if not value or not isinstance(value, str):
+                continue
+            try:
+                data[key] = json.loads(value)
+            except Exception:
+                data[key] = value
+
+        metric = metrics or {}
+        reflection_count = int(metric.get("reflection_count") or 0)
+        tool_call_count = int(metric.get("tool_call_count") or 0)
+        tool_call_success_count = int(metric.get("tool_call_success_count") or 0)
+        initial_score = metric.get("initial_score")
+        if initial_score is None:
+            initial_score = float(data.get("score") or 0.0)
+        final_score = float(data.get("score") or 0.0)
+
+        data["reflection_count"] = reflection_count
+        data["tool_call_count"] = tool_call_count
+        data["tool_call_success_count"] = tool_call_success_count
+        data["initial_score"] = float(initial_score)
+        data["reflection_roi"] = (
+            round(max(final_score - float(initial_score), 0.0), 4) if reflection_count else 0.0
+        )
+        return data
+
     def list_runs(self, limit: int = 50) -> list[dict]:
         with self._conn() as c:
             rows = c.execute(
                 "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", (limit,)
             ).fetchall()
-        return [dict(r) for r in rows]
+            metrics = self._run_metrics(c, [row["run_id"] for row in rows])
+        return [self._hydrate_run_row(r, metrics.get(r["run_id"])) for r in rows]
 
     def get_run(self, run_id: str) -> dict | None:
         with self._conn() as c:
@@ -338,14 +416,10 @@ class TraceStore:
                 "SELECT * FROM run_transitions WHERE run_id=? ORDER BY step, id",
                 (run_id,),
             ).fetchall()
-        data = dict(run)
+            metrics = self._run_metrics(c, [run_id])
+        data = self._hydrate_run_row(run, metrics.get(run_id))
         data["events"] = [_loads_row(dict(event)) for event in events]
         data["transitions"] = [_loads_row(dict(transition)) for transition in transitions]
-        if data.get("user_feedback"):
-            try:
-                data["user_feedback"] = json.loads(data["user_feedback"])
-            except Exception:
-                pass
         return data
 
 

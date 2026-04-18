@@ -56,7 +56,6 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     otel_service_name: str = "agentos-core"
     otel_exporter_otlp_endpoint: str = ""
-    eval_pass_threshold: float = 0.7
     vram_profile: str = "low"  # low | high
     refusal_patterns: list[str] = [
         "i don't know", "i cannot", "i'm unable", "i was unable", "unable to",

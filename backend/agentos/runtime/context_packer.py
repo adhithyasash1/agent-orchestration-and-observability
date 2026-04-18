@@ -25,10 +25,11 @@ Keep the final answer concise and useful.
 # Fallback budget ratios when callers don't thread a Settings through.
 # Kept in sync with the defaults on `agentos.config.Settings` so the two
 # paths match. Changing production behavior should be done via env vars,
-# not by editing these constants.
-DEFAULT_DEVELOPER_RATIO = 0.18
-DEFAULT_SCRATCHPAD_RATIO = 0.16
-DEFAULT_TOOL_RATIO = 0.28
+# Default ratios used when not provided by settings.
+# Aligned with Settings defaults in config.py.
+DEFAULT_DEVELOPER_RATIO = 0.15
+DEFAULT_SCRATCHPAD_RATIO = 0.15
+DEFAULT_TOOL_RATIO = 0.40
 
 
 @dataclass
@@ -76,12 +77,14 @@ def pack_context(
     developer_ratio: float = DEFAULT_DEVELOPER_RATIO,
     scratchpad_ratio: float = DEFAULT_SCRATCHPAD_RATIO,
     tool_ratio: float = DEFAULT_TOOL_RATIO,
+    is_research_task: bool | None = None,
 ) -> PackedContext:
     budget = max(1200, int(budget_chars or 0))
     developer_text = (developer_instructions or DEFAULT_DEVELOPER_INSTRUCTIONS).strip()
+    research_task = _is_research_task(user_input) if is_research_task is None else is_research_task
 
     # Dynamic Budgeting: if research-heavy task, rebalance for tools.
-    if _is_research_task(user_input):
+    if research_task:
         tool_ratio = 0.6
         # Re-verify sum
         scratchpad_ratio = 0.12 # slightly compress scratchpad
@@ -234,6 +237,8 @@ def _fit_chunks(chunks: list[ContextChunk], budget: int) -> list[ContextChunk]:
         output_data = chunk.meta.get("raw_output")
         if output_data:
             clipped = _intelligent_truncate(output_data, max_per_chunk)
+            if len(clipped) < 20:
+                clipped = _truncate(text, max_per_chunk)
         else:
             clipped = _truncate(text, max_per_chunk)
             

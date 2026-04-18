@@ -2,8 +2,12 @@ import os
 import json
 import asyncio
 import logging
-from mcp import ClientSession
-from mcp.client.stdio import StdioServerParameters, stdio_client
+try:
+    from mcp import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+    _MCP_AVAILABLE = True
+except ImportError:
+    _MCP_AVAILABLE = False
 from ..core import _REGISTERED_TOOLS, Tool
 
 logger = logging.getLogger("agentos.mcp")
@@ -32,6 +36,9 @@ class MCPBridge:
         self.env = config.get("env", None)
         
     async def call_tool(self, tool_name: str, arguments: dict) -> dict:
+        if not _MCP_AVAILABLE:
+            return {"status": "error", "error": "mcp package not installed"}
+
         server_params = StdioServerParameters(
             command=self.command,
             args=self.args,
@@ -63,7 +70,10 @@ class MCPBridge:
 
 def register_mcp_servers():
     """Discover and register MCP tools into the AgentOS registry."""
-    
+    if not _MCP_AVAILABLE:
+        logger.info("MCP client libraries not found. Skipping MCP tool discovery.")
+        return
+
     # 1. Register Configured Global Servers
     for name, cfg in DEFAULT_SERVERS.items():
         if not cfg.get("enabled"):

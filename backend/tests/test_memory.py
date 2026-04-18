@@ -1,5 +1,6 @@
 import pytest
 
+from agentos.config import settings as runtime_settings
 from agentos.memory.store import MEMORY_KINDS
 
 
@@ -61,4 +62,38 @@ def test_promote_verified_fact_writes_episodic_and_semantic(memory):
     )
     assert set(ids.keys()) == {"episodic_id", "semantic_id"}
     assert memory.count(["episodic"]) == 1
+    assert memory.count(["semantic"]) == 1
+
+
+def test_failure_memories_are_retrievable(memory):
+    memory.record_failure(
+        user_input="What is 2+2?",
+        plan=[],
+        tool_calls=[],
+        error_or_answer="wrong",
+        run_id="test",
+        score=0.1,
+    )
+    hits = memory.search("2+2", k=5, kinds=["failure"])
+    assert len(hits) == 1
+
+
+def test_stats_includes_expiring_count(memory):
+    memory.add("expiring soon", kind="working", ttl_seconds=30)
+    stats = memory.stats()
+    assert stats["expiring_within_1h"] >= 1
+
+
+def test_semantic_dedup_does_not_insert_duplicate(memory, monkeypatch):
+    if not runtime_settings.enable_embeddings or memory.embed_client is None:
+        pytest.skip("embeddings disabled")
+
+    monkeypatch.setattr(
+        memory.embed_client,
+        "embed_text",
+        lambda text: [0.1, 0.2, 0.3, 0.4],
+    )
+
+    memory.add("The same semantic fact appears here.", kind="semantic", salience=0.9)
+    memory.add("The same semantic fact appears here.", kind="semantic", salience=0.95)
     assert memory.count(["semantic"]) == 1

@@ -119,8 +119,6 @@ def build_default_registry(settings) -> ToolRegistry:
         return reg
 
     # Core Auto-Discovery
-    _REGISTERED_TOOLS.clear()
-    
     import agentos.tools.modules as modules_pkg
     
     # 1. Discover all modules in `agentos/tools/modules`

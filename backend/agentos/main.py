@@ -32,6 +32,10 @@ async def lifespan(app: FastAPI):
         settings.profile, settings.llm_backend,
     )
     yield
+    c = app.state.components
+    c.memory.close()
+    c.traces.close()
+    logging.getLogger("agentos").info("agentos-core shut down cleanly.")
 
 
 app = FastAPI(title="agentos-core", version="0.1.0", lifespan=lifespan)
