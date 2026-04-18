@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, startTransition, useDeferredValue } from "react";
+import { useDeferredValue, useEffect, useMemo, useState, startTransition } from "react";
 import type { ComponentType } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion } from "motion/react";
@@ -12,15 +12,43 @@ import { RunList } from "@/components/run-list";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { api } from "@/lib/api";
+import { useStore } from "@/lib/store";
+import type { RunComparison, UploadedFile } from "@/lib/types";
 import { formatPercent, formatScore, scoreTone } from "@/lib/utils";
+
+function newSessionId() {
+  return `session-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 export function DashboardShell() {
   const queryClient = useQueryClient();
+  const {
+    conversationSessionId,
+    setConversationSessionId,
+    showToast,
+  } = useStore();
+
   const [prompt, setPrompt] = useState("");
+  const [tag, setTag] = useState("");
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [compareTargetId, setCompareTargetId] = useState("");
+  const [compareResult, setCompareResult] = useState<RunComparison | null>(null);
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [search, setSearch] = useState("");
+  const [tagFilter, setTagFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [scoreMin, setScoreMin] = useState("");
+  const [scoreMax, setScoreMax] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [starredOnly, setStarredOnly] = useState(false);
   const deferredSearch = useDeferredValue(search);
+
+  useEffect(() => {
+    if (!conversationSessionId) {
+      setConversationSessionId(newSessionId());
+    }
+  }, [conversationSessionId, setConversationSessionId]);
 
   const healthQuery = useQuery({
     queryKey: ["health"],
@@ -37,8 +65,28 @@ export function DashboardShell() {
     queryFn: api.getTools
   });
   const runsQuery = useQuery({
-    queryKey: ["runs"],
-    queryFn: () => api.listRuns(40),
+    queryKey: [
+      "runs",
+      deferredSearch,
+      tagFilter,
+      scoreMin,
+      scoreMax,
+      dateFrom,
+      dateTo,
+      starredOnly,
+      conversationSessionId,
+    ],
+    queryFn: () =>
+      api.listRuns({
+        limit: 120,
+        search: deferredSearch || undefined,
+        minScore: scoreMin ? Number(scoreMin) : undefined,
+        maxScore: scoreMax ? Number(scoreMax) : undefined,
+        dateFrom: dateFrom ? new Date(`${dateFrom}T00:00:00`).toISOString() : undefined,
+        dateTo: dateTo ? new Date(`${dateTo}T23:59:59`).toISOString() : undefined,
+        starred: starredOnly || undefined,
+        tag: tagFilter || undefined,
+      }),
     refetchInterval: 15000
   });
   const runDetailQuery = useQuery({
@@ -59,8 +107,18 @@ export function DashboardShell() {
     }
   }, [runsQuery.data, selectedRunId]);
 
+  useEffect(() => {
+    setCompareResult(null);
+    setCompareTargetId("");
+  }, [selectedRunId]);
+
   const createRun = useMutation({
-    mutationFn: api.createRun,
+    mutationFn: () =>
+      api.createRun(prompt, {
+        tag: tag || undefined,
+        session_id: conversationSessionId || undefined,
+        workspace_files: uploadedFiles.map((file) => file.path),
+      }),
     onSuccess: async (result) => {
       setPrompt("");
       await Promise.all([
@@ -70,7 +128,18 @@ export function DashboardShell() {
       const detail = await api.getRun(result.run_id);
       queryClient.setQueryData(["run", result.run_id], detail);
       startTransition(() => setSelectedRunId(result.run_id));
-    }
+      showToast(`Run ${result.run_id} completed`, "success");
+    },
+    onError: (error: Error) => showToast(error.message, "error"),
+  });
+
+  const uploadMutation = useMutation({
+    mutationFn: (file: File) => api.uploadFile(file, conversationSessionId || undefined),
+    onSuccess: (file) => {
+      setUploadedFiles((prev) => [file, ...prev.filter((item) => item.path !== file.path)]);
+      showToast(`Uploaded ${file.path}`, "success");
+    },
+    onError: (error: Error) => showToast(error.message, "error"),
   });
 
   const feedbackMutation = useMutation({
@@ -85,23 +154,54 @@ export function DashboardShell() {
     }
   });
 
-  const runs = (runsQuery.data ?? []).filter((run) => {
-    const matchesStatus = statusFilter === "all" || run.status === statusFilter;
-    const matchesSearch =
-      !deferredSearch.trim() ||
-      run.user_input.toLowerCase().includes(deferredSearch.trim().toLowerCase());
-    return matchesStatus && matchesSearch;
+  const patchRunMutation = useMutation({
+    mutationFn: ({ runId, patch }: { runId: string; patch: { starred?: boolean; tag?: string | null; session_id?: string | null } }) =>
+      api.patchRun(runId, patch),
+    onSuccess: (detail) => {
+      queryClient.setQueryData(["run", detail.run_id], detail);
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+    },
   });
 
-  const visibleRuns = runsQuery.data ?? [];
+  const compareMutation = useMutation({
+    mutationFn: ({ left, right }: { left: string; right: string }) => api.compareRuns(left, right),
+    onSuccess: (data) => setCompareResult(data),
+    onError: (error: Error) => showToast(error.message, "error"),
+  });
+
+  const runs = useMemo(() => {
+    return (runsQuery.data ?? []).filter((run) => {
+      if (statusFilter !== "all" && run.status !== statusFilter) {
+        return false;
+      }
+      return true;
+    });
+  }, [runsQuery.data, statusFilter]);
+
   const successRate =
-    visibleRuns.length > 0
-      ? visibleRuns.filter((run) => run.score >= 0.6).length / visibleRuns.length
+    runs.length > 0
+      ? runs.filter((run) => run.score >= 0.6).length / runs.length
       : 0;
   const averageScore =
-    visibleRuns.length > 0
-      ? visibleRuns.reduce((sum, run) => sum + (run.score ?? 0), 0) / visibleRuns.length
+    runs.length > 0
+      ? runs.reduce((sum, run) => sum + (run.score ?? 0), 0) / runs.length
       : 0;
+
+  const exportSelectedRun = async () => {
+    if (!selectedRunId) return;
+    try {
+      const report = await api.exportRunReport(selectedRunId);
+      const blob = new Blob([report], { type: "text/markdown" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${selectedRunId}.md`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      showToast((error as Error).message, "error");
+    }
+  };
 
   return (
     <main className="min-h-screen bg-shell-glow px-4 py-5 text-white sm:px-6 lg:px-8">
@@ -115,10 +215,9 @@ export function DashboardShell() {
             <CardHeader>
               <div>
                 <p className="text-xs uppercase tracking-[0.24em] text-accent">Agentos Console</p>
-                <CardTitle className="mt-3 text-4xl">Observe memory, planning, verification, and reward traces in one place.</CardTitle>
+                <CardTitle className="mt-3 text-4xl">Observe runs, compare traces, and keep a live conversation session.</CardTitle>
                 <CardDescription className="mt-3 max-w-2xl text-base">
-                  This frontend sits on the richer runtime contracts now available in the backend: tiered memory,
-                  context packet metadata, ReAct planner outputs, OpenTelemetry-ready trace tags, and RL transitions.
+                  Search and pin important runs, attach workspace files, compare two traces side-by-side, and keep multi-turn context flowing through one session id.
                 </CardDescription>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -126,6 +225,7 @@ export function DashboardShell() {
                 <Badge>{healthQuery.data?.config.profile ?? "profile"}</Badge>
                 <Badge>{healthQuery.data?.config.llm_backend ?? "llm"}</Badge>
                 <Badge>{healthQuery.data?.config.prompt_version ?? "prompt"}</Badge>
+                <Badge>session {(conversationSessionId ?? "pending").slice(0, 8)}</Badge>
               </div>
             </CardHeader>
           </Card>
@@ -133,9 +233,9 @@ export function DashboardShell() {
           <div className="grid gap-4 sm:grid-cols-2">
             <MetricCard
               icon={Activity}
-              label="Recent Runs"
-              value={String(visibleRuns.length)}
-              detail="Live run window"
+              label="Visible Runs"
+              value={String(runs.length)}
+              detail="filtered from SQL-backed history"
             />
             <MetricCard
               icon={BrainCircuit}
@@ -163,15 +263,26 @@ export function DashboardShell() {
           <div className="space-y-5">
             <RunComposer
               value={prompt}
+              tag={tag}
+              sessionId={conversationSessionId ?? ""}
+              files={uploadedFiles}
               onChange={setPrompt}
-              onSubmit={() => createRun.mutate(prompt)}
+              onTagChange={setTag}
+              onSessionChange={setConversationSessionId}
+              onResetSession={() => {
+                setConversationSessionId(newSessionId());
+                setUploadedFiles([]);
+              }}
+              onUpload={(file) => uploadMutation.mutate(file)}
+              onSubmit={() => createRun.mutate()}
               isPending={createRun.isPending}
+              isUploading={uploadMutation.isPending}
               statusText={
                 createRun.isSuccess
                   ? `Latest score ${formatScore(createRun.data?.score)} • ${createRun.data?.latency_ms ?? 0} ms`
                   : createRun.isError
                     ? (createRun.error as Error).message
-                    : "Send a prompt to create a fresh run."
+                    : "Upload files, set a tag, or keep the same session for multi-turn memory."
               }
             />
             <Card className="p-6">
@@ -196,7 +307,11 @@ export function DashboardShell() {
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {(toolsQuery.data ?? []).map((tool) => (
-                    <Badge key={tool.name}>{tool.name}</Badge>
+                    <Badge key={tool.name}>
+                      {tool.name}
+                      {tool.timeout ? ` • ${tool.timeout}s` : ""}
+                      {tool.retry_budget ? ` • retry ${tool.retry_budget}` : ""}
+                    </Badge>
                   ))}
                 </div>
               </CardContent>
@@ -207,17 +322,51 @@ export function DashboardShell() {
             runs={runs}
             selectedRunId={selectedRunId}
             search={search}
-            onSearchChange={setSearch}
+            tagFilter={tagFilter}
             statusFilter={statusFilter}
+            scoreMin={scoreMin}
+            scoreMax={scoreMax}
+            dateFrom={dateFrom}
+            dateTo={dateTo}
+            starredOnly={starredOnly}
+            onSearchChange={setSearch}
+            onTagFilterChange={setTagFilter}
             onStatusFilterChange={setStatusFilter}
+            onScoreMinChange={setScoreMin}
+            onScoreMaxChange={setScoreMax}
+            onDateFromChange={setDateFrom}
+            onDateToChange={setDateTo}
+            onStarredOnlyChange={setStarredOnly}
+            onToggleStar={(run) =>
+              patchRunMutation.mutate({
+                runId: run.run_id,
+                patch: { starred: !run.starred },
+              })
+            }
             onSelect={(runId) => startTransition(() => setSelectedRunId(runId))}
           />
 
           <RunDetail
             run={runDetailQuery.data}
+            compare={compareResult}
+            compareTargetId={compareTargetId}
             isPending={runDetailQuery.isPending}
             feedbackPending={feedbackMutation.isPending}
             onSubmitFeedback={(payload) => feedbackMutation.mutate(payload)}
+            onToggleStar={(starred) => {
+              if (!selectedRunId) return;
+              patchRunMutation.mutate({ runId: selectedRunId, patch: { starred } });
+            }}
+            onTagSave={(nextTag) => {
+              if (!selectedRunId) return;
+              patchRunMutation.mutate({ runId: selectedRunId, patch: { tag: nextTag || null } });
+            }}
+            onCompareTargetChange={setCompareTargetId}
+            onCompare={() => {
+              if (!selectedRunId || !compareTargetId.trim()) return;
+              compareMutation.mutate({ left: selectedRunId, right: compareTargetId.trim() });
+            }}
+            onExport={exportSelectedRun}
           />
         </section>
       </div>

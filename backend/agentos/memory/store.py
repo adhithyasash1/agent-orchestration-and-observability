@@ -951,12 +951,140 @@ class MemoryStore:
                 row = c.execute("SELECT COUNT(*) AS n FROM memory_entries").fetchone()
         return int(row["n"])
 
+    def _hydrate_entry_row(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        data = dict(row)
+        try:
+            data["meta"] = json.loads(data.get("meta") or "{}")
+        except Exception:
+            data["meta"] = {}
+        return data
+
+    def list_entries(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        query: str | None = None,
+        kind: str | None = None,
+        min_salience: float | None = None,
+        max_salience: float | None = None,
+    ) -> list[dict]:
+        where: list[str] = []
+        params: list[Any] = []
+        if query:
+            where.append("LOWER(text) LIKE ?")
+            params.append(f"%{query.strip().lower()}%")
+        if kind:
+            where.append("kind = ?")
+            params.append(_normalize_kind(kind))
+        if min_salience is not None:
+            where.append("salience >= ?")
+            params.append(float(min_salience))
+        if max_salience is not None:
+            where.append("salience <= ?")
+            params.append(float(max_salience))
+
+        sql = "SELECT * FROM memory_entries"
+        if where:
+            sql += f" WHERE {' AND '.join(where)}"
+        sql += " ORDER BY updated_at DESC, created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        with self._conn() as c:
+            rows = c.execute(sql, params).fetchall()
+        return [self._hydrate_entry_row(row) for row in rows]
+
+    def get_entry(self, entry_id: int) -> dict | None:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT * FROM memory_entries WHERE id=?",
+                (entry_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return self._hydrate_entry_row(row)
+
+    def update_entry(
+        self,
+        entry_id: int,
+        *,
+        text: str | None = None,
+        kind: str | None = None,
+        salience: float | None = None,
+        ttl_seconds: int | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> dict | None:
+        current = self.get_entry(entry_id)
+        if not current:
+            return None
+
+        fields: list[str] = []
+        params: list[Any] = []
+        if text is not None:
+            fields.append("text=?")
+            params.append(text)
+        if kind is not None:
+            fields.append("kind=?")
+            params.append(_normalize_kind(kind))
+        if salience is not None:
+            fields.append("salience=?")
+            params.append(_clamp_salience(salience))
+        if meta is not None:
+            fields.append("meta=?")
+            params.append(json.dumps(meta))
+        if ttl_seconds is not None:
+            if ttl_seconds <= 0:
+                raise ValueError("ttl_seconds must be positive")
+            fields.append("ttl_seconds=?")
+            params.append(int(ttl_seconds))
+            fields.append("expires_at=?")
+            params.append(time.time() + int(ttl_seconds))
+
+        fields.append("updated_at=?")
+        params.append(time.time())
+        params.append(entry_id)
+
+        with self._conn() as c:
+            c.execute(
+                f"UPDATE memory_entries SET {', '.join(fields)} WHERE id=?",
+                params,
+            )
+            c.execute(
+                "UPDATE system_state SET value = CAST(value AS INTEGER) + 1 WHERE key = 'memory_version'"
+            )
+        return self.get_entry(entry_id)
+
+    def delete_entry(self, entry_id: int) -> bool:
+        with self._conn() as c:
+            cur = c.execute(
+                "DELETE FROM memory_entries WHERE id=?",
+                (entry_id,),
+            )
+            if cur.rowcount:
+                c.execute(
+                    "UPDATE system_state SET value = CAST(value AS INTEGER) + 1 WHERE key = 'memory_version'"
+                )
+        return bool(cur.rowcount)
+
     def stats(self) -> dict:
         now = time.time()
         with self._conn() as c:
             total = int(c.execute("SELECT COUNT(*) AS n FROM memory_entries").fetchone()["n"])
             rows = c.execute(
                 "SELECT kind, COUNT(*) AS n FROM memory_entries GROUP BY kind"
+            ).fetchall()
+            salience_rows = c.execute(
+                """
+                SELECT CASE
+                           WHEN salience >= 1 THEN 9
+                           WHEN salience <= 0 THEN 0
+                           ELSE CAST(salience * 10 AS INTEGER)
+                       END AS bucket,
+                       COUNT(*) AS n
+                FROM memory_entries
+                GROUP BY bucket
+                ORDER BY bucket
+                """
             ).fetchall()
             expiring_soon = int(c.execute(
                 "SELECT COUNT(*) AS n FROM memory_entries "
@@ -966,7 +1094,23 @@ class MemoryStore:
         by_kind = {kind: 0 for kind in MEMORY_KINDS}
         for row in rows:
             by_kind[row["kind"]] = int(row["n"])
-        return {"count": total, "by_kind": by_kind, "expiring_within_1h": expiring_soon}
+        histogram = [
+            {
+                "bucket": f"{i / 10:.1f}-{(i + 1) / 10:.1f}",
+                "count": 0,
+            }
+            for i in range(10)
+        ]
+        for row in salience_rows:
+            bucket = int(row["bucket"])
+            if 0 <= bucket < len(histogram):
+                histogram[bucket]["count"] = int(row["n"])
+        return {
+            "count": total,
+            "by_kind": by_kind,
+            "expiring_within_1h": expiring_soon,
+            "salience_histogram": histogram,
+        }
 
     def clear(self, kinds: Iterable[str] | None = None) -> None:
         normalized_kinds = _normalize_kinds(kinds)

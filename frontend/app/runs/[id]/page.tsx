@@ -6,6 +6,7 @@ import {
   Bot,
   Brain,
   CheckCircle2,
+  ChevronLeft,
   Clock,
   Database,
   Sparkles,
@@ -15,6 +16,7 @@ import {
 } from "lucide-react";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 
 import { ErrorBoundary, PageError } from "@/components/error-boundary";
@@ -80,6 +82,13 @@ export default function TraceInspectorPage() {
   return (
     <ErrorBoundary fallback={<PageError />}>
       <div className="space-y-6 animate-fade-in pb-20">
+        <Link 
+          href="/runs"
+          className="inline-flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-muted transition-colors hover:text-accent"
+        >
+          <ChevronLeft className="h-4 w-4" />
+          Back to Console
+        </Link>
         <div className="flex flex-col justify-between gap-6 rounded-2xl bg-glass p-6 md:flex-row md:items-center">
           <div className="space-y-2">
             <div className="flex items-center gap-3">

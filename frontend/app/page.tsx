@@ -74,16 +74,17 @@ export default function DashboardPage() {
         <AnimatePresence>{isDispatchOpen && <DispatchComposer onClose={() => setDispatchOpen(false)} />}</AnimatePresence>
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-          <StatCard label="Total Runs" value={runs.length} icon={History} color="text-accent" />
+          <StatCard label="Total Runs" value={runs.length} icon={History} color="text-accent" href="/runs" />
           <StatCard
             label="Avg Score"
             value={avgScore.toFixed(2)}
             icon={BarChart3}
             color={avgScore >= 0.7 ? "text-success" : avgScore >= 0.4 ? "text-gold" : "text-danger"}
             suffix="/1.0"
+            href="/runs"
           />
-          <StatCard label="Memory Entries" value={memory?.count || 0} icon={Database} color="text-purple-400" />
-          <StatCard label="Active Tools" value={tools.length} icon={Cpu} color="text-emerald-400" />
+          <StatCard label="Memory Entries" value={memory?.count || 0} icon={Database} color="text-purple-400" href="/memory" />
+          <StatCard label="Active Tools" value={tools.length} icon={Cpu} color="text-emerald-400" href="/settings" />
         </div>
 
         <div className="grid grid-cols-1 gap-8 lg:grid-cols-3">
@@ -117,7 +118,7 @@ export default function DashboardPage() {
                       key={run.run_id}
                       className="group cursor-pointer transition-colors hover:bg-white/5"
                       onClick={() => {
-                        window.location.href = `/runs/${run.run_id}`;
+                        router.push(`/runs/${run.run_id}`);
                       }}
                     >
                       <td className="px-6 py-4 text-xs font-mono text-accent">#{run.run_id.slice(0, 8)}</td>
@@ -179,15 +180,17 @@ function StatCard({
   icon: Icon,
   color,
   suffix = "",
+  href,
 }: {
   label: string;
   value: string | number;
   icon: typeof History;
   color: string;
   suffix?: string;
+  href?: string;
 }) {
-  return (
-    <div className="group relative overflow-hidden rounded-2xl bg-glass p-6">
+  const content = (
+    <div className="group relative overflow-hidden rounded-2xl bg-glass p-6 h-full transition-all hover:ring-1 hover:ring-white/20 active:scale-[0.98]">
       <div className={cn("absolute right-0 top-0 p-4 opacity-10 transition-transform group-hover:scale-110", color)}>
         <Icon className="h-12 w-12" />
       </div>
@@ -202,6 +205,12 @@ function StatCard({
       </div>
     </div>
   );
+
+  if (href) {
+    return <Link href={href}>{content}</Link>;
+  }
+
+  return content;
 }
 
 function DispatchComposer({ onClose }: { onClose: () => void }) {

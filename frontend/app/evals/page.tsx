@@ -2,7 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { Activity, Lightbulb, Minus, TrendingDown, TrendingUp } from "lucide-react";
-import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useEffect, useState } from "react";
 
 import { ErrorBoundary, PageError } from "@/components/error-boundary";
@@ -13,6 +13,11 @@ export default function EvaluationsPage() {
   const { data, isLoading } = useQuery({
     queryKey: ["eval-results"],
     queryFn: () => api.getEvalResults(),
+  });
+
+  const { data: toolStats } = useQuery({
+    queryKey: ["tool-latency-stats"],
+    queryFn: () => api.getToolLatencyStats(120),
   });
 
   const metrics = [
@@ -44,7 +49,7 @@ export default function EvaluationsPage() {
           </div>
         </header>
 
-        <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col space-y-8 overflow-auto p-6">
+        <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col space-y-8 overflow-auto p-6">
           {isLoading && <div className="h-64 animate-pulse rounded-2xl bg-glass" />}
 
           {data && (
@@ -104,14 +109,30 @@ export default function EvaluationsPage() {
                 ))}
               </div>
 
-              <section className="flex h-[350px] flex-col rounded-xl border border-border bg-glass p-5 shadow-sm">
-                <h2 className="mb-6 text-[12px] font-bold uppercase tracking-wide text-muted">
-                  Last 20 Run Scores
-                </h2>
-                <div className="min-h-0 flex-1">
-                  <EvalScoreChart data={data.chartData} />
-                </div>
-              </section>
+              <div className="grid gap-6 lg:grid-cols-2">
+                <section className="flex h-[350px] flex-col rounded-xl border border-border bg-glass p-5 shadow-sm">
+                  <h2 className="mb-6 text-[12px] font-bold uppercase tracking-wide text-muted">
+                    Score Trend
+                  </h2>
+                  <div className="min-h-0 flex-1">
+                    <EvalScoreChart data={data.chartData} />
+                  </div>
+                </section>
+
+                <section className="flex h-[350px] flex-col rounded-xl border border-border bg-glass p-5 shadow-sm">
+                  <h2 className="mb-6 text-[12px] font-bold uppercase tracking-wide text-muted">
+                    Per-Tool Latency Breakdown
+                  </h2>
+                  <div className="min-h-0 flex-1">
+                    <ToolLatencyChart
+                      data={(toolStats ?? []).map((row) => ({
+                        tool: row.tool,
+                        avg_latency_ms: row.avg_latency_ms,
+                      }))}
+                    />
+                  </div>
+                </section>
+              </div>
             </>
           )}
         </main>
@@ -170,6 +191,27 @@ function EvalScoreChart({ data }: { data: EvalChartPoint[] }) {
           activeDot={{ r: 6, fill: "hsl(var(--accent))", stroke: "hsl(var(--background))", strokeWidth: 2 }}
         />
       </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
+function ToolLatencyChart({ data }: { data: Array<{ tool: string; avg_latency_ms: number }> }) {
+  return (
+    <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={220}>
+      <BarChart data={data}>
+        <CartesianGrid stroke="rgba(255,255,255,0.05)" strokeDasharray="3 3" vertical={false} />
+        <XAxis dataKey="tool" stroke="hsl(var(--muted))" fontSize={11} tickLine={false} axisLine={false} />
+        <YAxis stroke="hsl(var(--muted))" fontSize={11} tickLine={false} axisLine={false} />
+        <Tooltip
+          contentStyle={{
+            backgroundColor: "hsl(var(--background))",
+            border: "1px solid hsl(var(--border))",
+            borderRadius: "12px",
+            fontSize: "12px",
+          }}
+        />
+        <Bar dataKey="avg_latency_ms" fill="hsl(var(--accent))" radius={[8, 8, 0, 0]} />
+      </BarChart>
     </ResponsiveContainer>
   );
 }

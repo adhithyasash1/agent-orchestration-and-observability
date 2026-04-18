@@ -10,13 +10,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
+import shutil
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, UploadFile, File, Form
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 import re
+
+try:
+    import python_multipart  # type: ignore
+    MULTIPART_AVAILABLE = True
+except Exception:
+    MULTIPART_AVAILABLE = False
 
 try:
     from sse_starlette.sse import EventSourceResponse
@@ -34,7 +44,9 @@ from ..llm import build_llm
 from ..llm.protocol import LLM
 from ..memory.store import MemoryStore
 from ..runtime import TraceStore, run_agent
+from ..runtime.planner import resolve_planner_prompt
 from ..tools.registry import ToolRegistry, build_default_registry
+from ..tools.modules.workspace import WORKSPACE_DIR
 
 
 @dataclass
@@ -63,6 +75,19 @@ def get_components(request: Request) -> Components:
     return components
 
 
+def get_scheduler(request: Request):
+    return getattr(request.app.state, "scheduler", None)
+
+
+def _config_payload(settings: Settings) -> dict[str, Any]:
+    data = settings.describe()
+    data["planner_prompt_template"] = resolve_planner_prompt(settings.planner_prompt_template)
+    data["vision_model"] = settings.vision_model
+    data["vision_timeout_seconds"] = settings.vision_timeout_seconds
+    data["scheduler_timezone"] = settings.scheduler_timezone
+    return data
+
+
 _config_lock = asyncio.Lock()
 _run_semaphore = asyncio.Semaphore(10)
 
@@ -71,6 +96,9 @@ api_router = APIRouter()
 
 class RunRequest(BaseModel):
     input: str = Field(..., min_length=1, max_length=4000)
+    tag: str | None = Field(default=None, max_length=64)
+    session_id: str | None = Field(default=None, max_length=128)
+    workspace_files: list[str] | None = None
 
     @field_validator("input")
     def sanitize_input(cls, v: str) -> str:
@@ -100,9 +128,17 @@ class ConfigPatch(BaseModel):
     enable_llm_judge: bool | None = None
     enable_otel: bool | None = None
     force_local_only: bool | None = None
+    allow_internet_mcp: bool | None = None
+    enable_sequential_thinking_mcp: bool | None = None
+    enable_excel_mcp: bool | None = None
+    enable_markdownify_mcp: bool | None = None
+    enable_playwright_mcp: bool | None = None
+    enable_trading_tools: bool | None = None
     debug_verbose: bool | None = None
     context_char_budget: int | None = Field(default=None, ge=1000, le=500000)
     max_steps: int | None = Field(default=None, ge=1, le=100)
+    prompt_version: str | None = Field(default=None, max_length=120)
+    planner_prompt_template: str | None = Field(default=None, max_length=24000)
 
 
 class MemorySearchRequest(BaseModel):
@@ -115,6 +151,48 @@ class MemorySearchRequest(BaseModel):
 class RunFeedbackRequest(BaseModel):
     rating: int | None = Field(default=None, ge=1, le=5)
     notes: str | None = Field(default=None, max_length=2000)
+
+
+class RunPatchRequest(BaseModel):
+    starred: bool | None = None
+    tag: str | None = Field(default=None, max_length=64)
+    session_id: str | None = Field(default=None, max_length=128)
+
+
+class MemoryEntryCreateRequest(BaseModel):
+    kind: str = Field(default="working", max_length=32)
+    text: str = Field(..., min_length=1, max_length=12000)
+    salience: float = Field(default=0.5, ge=0.0, le=1.0)
+    ttl_seconds: int | None = Field(default=None, ge=1)
+    meta: dict[str, Any] | None = None
+
+
+class MemoryEntryPatchRequest(BaseModel):
+    kind: str | None = Field(default=None, max_length=32)
+    text: str | None = Field(default=None, min_length=1, max_length=12000)
+    salience: float | None = Field(default=None, ge=0.0, le=1.0)
+    ttl_seconds: int | None = Field(default=None, ge=1)
+    meta: dict[str, Any] | None = None
+
+
+class ScheduleCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    cron: str = Field(..., min_length=5, max_length=120)
+    input: str = Field(..., min_length=1, max_length=4000)
+    tag: str | None = Field(default=None, max_length=64)
+    session_id: str | None = Field(default=None, max_length=128)
+    timezone: str = Field(default="UTC", max_length=64)
+    enabled: bool = True
+
+
+class SchedulePatchRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    cron: str | None = Field(default=None, min_length=5, max_length=120)
+    input: str | None = Field(default=None, min_length=1, max_length=4000)
+    tag: str | None = Field(default=None, max_length=64)
+    session_id: str | None = Field(default=None, max_length=128)
+    timezone: str | None = Field(default=None, max_length=64)
+    enabled: bool | None = None
 
 
 @api_router.post("/runs")
@@ -132,6 +210,9 @@ async def create_run(req: RunRequest, c: Components = Depends(get_components)):
             memory=c.memory,
             traces=c.traces,
             config=c.settings,
+            session_id=req.session_id,
+            tag=req.tag,
+            workspace_files=req.workspace_files,
         )
     finally:
         _run_semaphore.release()
@@ -154,6 +235,8 @@ async def create_run(req: RunRequest, c: Components = Depends(get_components)):
         "prompt_version": result.prompt_version,
         "verification": result.verification,
         "initial_score": result.initial_score,
+        "tag": result.tag,
+        "session_id": result.session_id,
     }
 
 
@@ -173,14 +256,31 @@ async def create_run_async(
         c.settings.profile,
         c.settings.describe()["flags"],
         prompt_version=c.settings.prompt_version,
+        tag=req.tag,
+        session_id=req.session_id,
     )
 
-    background_tasks.add_task(_run_agent_background_task, req.input, c, run_id)
+    background_tasks.add_task(
+        _run_agent_background_task,
+        req.input,
+        c,
+        run_id,
+        req.session_id,
+        req.tag,
+        req.workspace_files or [],
+    )
 
-    return {"run_id": run_id, "status": "running"}
+    return {"run_id": run_id, "status": "running", "tag": req.tag, "session_id": req.session_id}
 
 
-async def _run_agent_background_task(user_input: str, c: Components, run_id: str):
+async def _run_agent_background_task(
+    user_input: str,
+    c: Components,
+    run_id: str,
+    session_id: str | None = None,
+    tag: str | None = None,
+    workspace_files: list[str] | None = None,
+):
     async with _run_semaphore:
         try:
             await run_agent(
@@ -191,6 +291,9 @@ async def _run_agent_background_task(user_input: str, c: Components, run_id: str
                 traces=c.traces,
                 config=c.settings,
                 run_id=run_id,
+                session_id=session_id,
+                tag=tag,
+                workspace_files=workspace_files,
             )
         except Exception as e:
             # If a background run crashes, ensure the run is marked as failed.
@@ -198,8 +301,29 @@ async def _run_agent_background_task(user_input: str, c: Components, run_id: str
 
 
 @api_router.get("/runs")
-async def list_runs(limit: int = 50, c: Components = Depends(get_components)):
-    return c.traces.list_runs(limit=limit)
+async def list_runs(
+    limit: int = 50,
+    search: str | None = None,
+    min_score: float | None = None,
+    max_score: float | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    starred: bool | None = None,
+    tag: str | None = None,
+    session_id: str | None = None,
+    c: Components = Depends(get_components),
+):
+    return c.traces.list_runs(
+        limit=limit,
+        search=search,
+        min_score=min_score,
+        max_score=max_score,
+        date_from=date_from.isoformat() if date_from else None,
+        date_to=date_to.isoformat() if date_to else None,
+        starred=starred,
+        tag=tag,
+        session_id=session_id,
+    )
 
 
 @api_router.get("/runs/export")
@@ -239,9 +363,66 @@ async def export_rlhf(
     return pairs
 
 
+@api_router.get("/runs/compare")
+async def compare_runs(
+    left_run_id: str,
+    right_run_id: str,
+    c: Components = Depends(get_components),
+):
+    left = c.traces.get_run(left_run_id)
+    right = c.traces.get_run(right_run_id)
+    if not left or not right:
+        raise HTTPException(404, "one or both runs not found")
+    return {
+        "left": left,
+        "right": right,
+        "summary": {
+            "score_delta": float(left.get("score") or 0.0) - float(right.get("score") or 0.0),
+            "latency_delta_ms": int(left.get("total_latency_ms") or 0) - int(right.get("total_latency_ms") or 0),
+            "event_delta": len(left.get("events", [])) - len(right.get("events", [])),
+            "transition_delta": len(left.get("transitions", [])) - len(right.get("transitions", [])),
+        },
+    }
+
+
+@api_router.get("/runs/tool-stats")
+async def run_tool_stats(
+    limit_runs: int = 100,
+    c: Components = Depends(get_components),
+):
+    return c.traces.tool_latency_breakdown(limit_runs=limit_runs)
+
+
 @api_router.get("/runs/{run_id}")
 async def get_run(run_id: str, c: Components = Depends(get_components)):
     run = c.traces.get_run(run_id)
+    if not run:
+        raise HTTPException(404, "run not found")
+    return run
+
+
+@api_router.get("/runs/{run_id}/report")
+async def export_run_report(run_id: str, c: Components = Depends(get_components)):
+    report = c.traces.export_run_markdown(run_id)
+    if report is None:
+        raise HTTPException(404, "run not found")
+    return PlainTextResponse(report, media_type="text/markdown")
+
+
+@api_router.patch("/runs/{run_id}")
+async def patch_run(
+    run_id: str,
+    req: RunPatchRequest,
+    c: Components = Depends(get_components),
+):
+    changes: dict[str, Any] = {}
+    if "starred" in req.model_fields_set:
+        changes["starred"] = req.starred
+    if "tag" in req.model_fields_set:
+        changes["tag"] = req.tag
+    if "session_id" in req.model_fields_set:
+        changes["session_id"] = req.session_id
+    run = c.traces.update_run(run_id, **changes)
     if not run:
         raise HTTPException(404, "run not found")
     return run
@@ -296,6 +477,50 @@ async def memory_stats(c: Components = Depends(get_components)):
     return await asyncio.to_thread(c.memory.stats)
 
 
+@api_router.get("/memory")
+async def list_memory_entries(
+    limit: int = 100,
+    offset: int = 0,
+    query: str | None = None,
+    kind: str | None = None,
+    min_salience: float | None = None,
+    max_salience: float | None = None,
+    c: Components = Depends(get_components),
+):
+    try:
+        return await asyncio.to_thread(
+            c.memory.list_entries,
+            limit=limit,
+            offset=offset,
+            query=query,
+            kind=kind,
+            min_salience=min_salience,
+            max_salience=max_salience,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@api_router.post("/memory")
+async def create_memory_entry(
+    req: MemoryEntryCreateRequest,
+    c: Components = Depends(get_components),
+):
+    try:
+        entry_id = await asyncio.to_thread(
+            c.memory.add,
+            req.text,
+            req.meta,
+            kind=req.kind,
+            salience=req.salience,
+            ttl_seconds=req.ttl_seconds,
+        )
+        entry = await asyncio.to_thread(c.memory.get_entry, entry_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return entry
+
+
 @api_router.post("/memory/search")
 async def memory_search(
     req: MemorySearchRequest,
@@ -314,17 +539,59 @@ async def memory_search(
     return {"results": results}
 
 
+@api_router.get("/memory/{entry_id}")
+async def get_memory_entry(entry_id: int, c: Components = Depends(get_components)):
+    entry = await asyncio.to_thread(c.memory.get_entry, entry_id)
+    if not entry:
+        raise HTTPException(404, "memory entry not found")
+    return entry
+
+
+@api_router.patch("/memory/{entry_id}")
+async def patch_memory_entry(
+    entry_id: int,
+    req: MemoryEntryPatchRequest,
+    c: Components = Depends(get_components),
+):
+    try:
+        entry = await asyncio.to_thread(
+            c.memory.update_entry,
+            entry_id,
+            **req.model_dump(exclude_unset=True, exclude_none=True),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not entry:
+        raise HTTPException(404, "memory entry not found")
+    return entry
+
+
+@api_router.delete("/memory/{entry_id}")
+async def delete_memory_entry(entry_id: int, c: Components = Depends(get_components)):
+    deleted = await asyncio.to_thread(c.memory.delete_entry, entry_id)
+    if not deleted:
+        raise HTTPException(404, "memory entry not found")
+    return {"status": "ok", "deleted": entry_id}
+
+
 @api_router.get("/tools")
 async def list_tools(c: Components = Depends(get_components)):
     return [
-        {"name": t.name, "description": t.description, "args": t.args_schema}
+        {
+            "name": t.name,
+            "description": t.description,
+            "args": t.args_schema,
+            "requires_internet": t.requires_internet,
+            "timeout": t.timeout,
+            "retry_budget": t.retry_budget,
+        }
         for t in c.tools.list()
     ]
 
 
 @api_router.get("/config")
 async def get_config(c: Components = Depends(get_components)):
-    return c.settings.describe()
+    return _config_payload(c.settings)
 
 
 @api_router.patch("/config")
@@ -348,7 +615,7 @@ async def patch_config(patch: ConfigPatch, request: Request):
         current: Components = request.app.state.components
         changes = patch.model_dump(exclude_none=True)
         if not changes:
-            return {"updated": {}, "current": current.settings.describe()}
+            return {"updated": {}, "current": _config_payload(current.settings)}
 
         updates: dict[str, dict[str, Any]] = {
             field: {"old": getattr(current.settings, field), "new": val}
@@ -364,7 +631,11 @@ async def patch_config(patch: ConfigPatch, request: Request):
             traces=TraceStore(new_settings.db_path, config=new_settings),
         )
         request.app.state.components = new_components
-        return {"updated": updates, "current": new_settings.describe()}
+        scheduler = get_scheduler(request)
+        if scheduler is not None:
+            scheduler.components = new_components
+            scheduler.reload()
+        return {"updated": updates, "current": _config_payload(new_settings)}
 
 
 class PurgeRequest(BaseModel):
@@ -394,6 +665,165 @@ async def dump_context(run_id: str | None = None, c: Components = Depends(get_co
     return {"status": "ok", "target": "backend_terminal"}
 
 
+@api_router.get("/schedules")
+async def list_schedules(c: Components = Depends(get_components)):
+    return c.traces.list_schedules()
+
+
+@api_router.post("/schedules")
+async def create_schedule(
+    req: ScheduleCreateRequest,
+    request: Request,
+    c: Components = Depends(get_components),
+):
+    scheduler = get_scheduler(request)
+    if req.enabled and not getattr(scheduler, "available", False):
+        raise HTTPException(503, "scheduler is unavailable; install APScheduler to enable cron runs")
+    schedule = c.traces.create_schedule(
+        name=req.name,
+        cron=req.cron,
+        user_input=req.input,
+        tag=req.tag,
+        session_id=req.session_id,
+        timezone_name=req.timezone,
+        enabled=req.enabled,
+    )
+    if scheduler is not None:
+        try:
+            schedule = scheduler.sync_schedule(schedule)
+        except Exception as exc:
+            c.traces.delete_schedule(schedule["schedule_id"])
+            raise HTTPException(400, f"invalid cron schedule: {exc}") from exc
+    return schedule
+
+
+@api_router.patch("/schedules/{schedule_id}")
+async def patch_schedule(
+    schedule_id: str,
+    req: SchedulePatchRequest,
+    request: Request,
+    c: Components = Depends(get_components),
+):
+    scheduler = get_scheduler(request)
+    changes = req.model_dump(exclude_unset=True, exclude_none=True)
+    if changes.get("enabled") and not getattr(scheduler, "available", False):
+        raise HTTPException(503, "scheduler is unavailable; install APScheduler to enable cron runs")
+    if "input" in changes:
+        changes["user_input"] = changes.pop("input")
+    schedule = c.traces.update_schedule(schedule_id, **changes)
+    if not schedule:
+        raise HTTPException(404, "schedule not found")
+    if scheduler is not None:
+        try:
+            schedule = scheduler.sync_schedule(schedule)
+        except Exception as exc:
+            raise HTTPException(400, f"invalid cron schedule: {exc}") from exc
+    return schedule
+
+
+@api_router.delete("/schedules/{schedule_id}")
+async def delete_schedule(
+    schedule_id: str,
+    request: Request,
+    c: Components = Depends(get_components),
+):
+    scheduler = get_scheduler(request)
+    if scheduler is not None:
+        scheduler.remove_schedule(schedule_id)
+    deleted = c.traces.delete_schedule(schedule_id)
+    if not deleted:
+        raise HTTPException(404, "schedule not found")
+    return {"status": "ok", "deleted": schedule_id}
+
+
+if MULTIPART_AVAILABLE:
+    @api_router.post("/files/upload")
+    async def upload_file(
+        file: UploadFile = File(...),
+        session_id: str | None = Form(default=None),
+        c: Components = Depends(get_components),
+    ):
+        filename = Path(file.filename or "upload.bin").name
+        if not filename:
+            raise HTTPException(400, "filename is required")
+
+        WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+        target = WORKSPACE_DIR / f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{filename}"
+        with target.open("wb") as handle:
+            shutil.copyfileobj(file.file, handle)
+
+        preview: str | None = None
+        semantic_summary: str | None = None
+        media_type, _ = mimetypes.guess_type(target.name)
+        suffix = target.suffix.lower()
+        relative_path = str(target.relative_to(WORKSPACE_DIR))
+
+        if suffix == ".pdf":
+            preview = await asyncio.to_thread(_extract_pdf_text, target)
+            if preview:
+                await asyncio.to_thread(
+                    c.memory.add,
+                    f"Uploaded PDF `{relative_path}`\n\n{preview[:4000]}",
+                    kind="working",
+                    salience=0.7,
+                    meta={"path": relative_path, "source": "upload", "session_id": session_id},
+                )
+        elif suffix in {".csv", ".tsv", ".xlsx", ".xls"}:
+            semantic_summary = await asyncio.to_thread(_summarize_tabular_file, target)
+            if semantic_summary:
+                await asyncio.to_thread(
+                    c.memory.add,
+                    semantic_summary,
+                    kind="semantic",
+                    salience=0.75,
+                    meta={"path": relative_path, "source": "upload", "session_id": session_id},
+                )
+        elif media_type and media_type.startswith("image/"):
+            preview = "Image stored in workspace. Use describe_image for visual analysis."
+            await asyncio.to_thread(
+                c.memory.add,
+                f"Uploaded image available at `{relative_path}`",
+                kind="working",
+                salience=0.6,
+                meta={"path": relative_path, "source": "upload", "session_id": session_id},
+            )
+        else:
+            try:
+                preview = target.read_text(encoding="utf-8")[:2000]
+            except Exception:
+                preview = None
+
+        return {
+            "filename": target.name,
+            "path": relative_path,
+            "media_type": media_type,
+            "preview": preview,
+            "semantic_summary": semantic_summary,
+        }
+else:
+    @api_router.post("/files/upload")
+    async def upload_file_unavailable():
+        raise HTTPException(503, "file uploads require python-multipart to be installed")
+
+
+@api_router.get("/files")
+async def list_uploaded_files():
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+    files = []
+    for item in sorted(WORKSPACE_DIR.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True):
+        if not item.is_file():
+            continue
+        files.append(
+            {
+                "name": item.name,
+                "path": str(item.relative_to(WORKSPACE_DIR)),
+                "size": item.stat().st_size,
+                "modified_at": datetime.fromtimestamp(item.stat().st_mtime, tz=timezone.utc).isoformat(),
+            }
+        )
+    return files
+
+
 def _clone_settings(settings: Settings, overrides: dict[str, Any]) -> Settings:
     """Return a copy of `settings` with `overrides` applied.
 
@@ -409,8 +839,49 @@ def _clone_settings(settings: Settings, overrides: dict[str, Any]) -> Settings:
     return Settings(**data)
 
 
+def _extract_pdf_text(path: Path) -> str | None:
+    try:
+        import fitz  # type: ignore
+    except Exception:
+        return None
+    try:
+        with fitz.open(path) as doc:
+            text = "\n".join(page.get_text() for page in doc[:5])
+    except Exception:
+        return None
+    return text[:8000] or None
+
+
+def _summarize_tabular_file(path: Path) -> str | None:
+    try:
+        import pandas as pd  # type: ignore
+    except Exception:
+        return None
+    try:
+        if path.suffix.lower() in {".xlsx", ".xls"}:
+            frame = pd.read_excel(path)
+        elif path.suffix.lower() == ".tsv":
+            frame = pd.read_csv(path, sep="\t")
+        else:
+            frame = pd.read_csv(path)
+    except Exception:
+        return None
+
+    columns = [
+        f"- {name}: {str(dtype)}"
+        for name, dtype in frame.dtypes.items()
+    ]
+    sample_rows = frame.head(3).to_dict(orient="records")
+    return (
+        f"Tabular dataset `{path.name}`\n"
+        f"Rows: {len(frame)}\n"
+        f"Columns:\n" + "\n".join(columns) +
+        "\nSample rows:\n" + json.dumps(sample_rows, default=str)[:2000]
+    )
+
+
 @api_router.get("/health")
-async def health(c: Components = Depends(get_components)):
+async def health(request: Request, c: Components = Depends(get_components)):
     deps = {"memory": "ok", "traces": "ok"}
     try:
         _ = await asyncio.to_thread(c.memory.count)
@@ -435,10 +906,15 @@ async def health(c: Components = Depends(get_components)):
     else:
         deps["llm"] = f"mock ({c.settings.llm_backend})"
 
+    scheduler = get_scheduler(request)
     deps["otel"] = "enabled" if c.traces.otel_enabled else "disabled"
-    all_ok = all(v.startswith(("ok", "mock")) or v == "disabled" for v in deps.values())
+    deps["scheduler"] = "enabled" if getattr(scheduler, "available", False) else "unavailable"
+    all_ok = all(
+        v.startswith(("ok", "mock")) or v in {"disabled", "unavailable"}
+        for v in deps.values()
+    )
     return {
         "status": "ok" if all_ok else "degraded",
         "dependencies": deps,
-        "config": c.settings.describe(),
+        "config": _config_payload(c.settings),
     }

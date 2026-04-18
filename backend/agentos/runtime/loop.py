@@ -62,6 +62,8 @@ class AgentResult:
     prompt_version: str = ""
     verification: dict[str, Any] = field(default_factory=dict)
     initial_score: float = 0.0
+    tag: str | None = None
+    session_id: str | None = None
 
 
 async def run_agent(
@@ -74,6 +76,9 @@ async def run_agent(
     config: Settings | None = None,
     expected: dict | None = None,
     run_id: str | None = None,
+    session_id: str | None = None,
+    tag: str | None = None,
+    workspace_files: list[str] | None = None,
 ) -> AgentResult:
     run = _AgentRun(
         user_input=user_input,
@@ -84,6 +89,9 @@ async def run_agent(
         cfg=config or default_settings,
         expected=expected,
         run_id=run_id,
+        session_id=session_id,
+        tag=tag,
+        workspace_files=workspace_files,
     )
     return await run.run()
 
@@ -108,6 +116,9 @@ class _AgentRun:
         cfg: Settings,
         expected: dict | None,
         run_id: str | None = None,
+        session_id: str | None = None,
+        tag: str | None = None,
+        workspace_files: list[str] | None = None,
     ) -> None:
         self.user_input = user_input
         self.llm = llm
@@ -117,6 +128,9 @@ class _AgentRun:
         self.cfg = cfg.model_copy(deep=True)
         self.expected = expected
         self._is_research = _is_research_task(user_input)
+        self.session_id = (session_id or "").strip() or None
+        self.tag = (tag or "").strip() or None
+        self.workspace_files = [item for item in (workspace_files or []) if item]
 
         if run_id:
             self.run_id = run_id
@@ -126,6 +140,8 @@ class _AgentRun:
                 cfg.profile,
                 cfg.describe()["flags"],
                 prompt_version=cfg.prompt_version,
+                tag=self.tag,
+                session_id=self.session_id,
             )
 
         self._step = 0
@@ -169,6 +185,7 @@ class _AgentRun:
 
         try:
             await self._stash_user_input()
+            await self._stash_workspace_files()
             self._emit_understand()
             await self._retrieve()
             self.current_pack = self._pack()
@@ -291,6 +308,9 @@ class _AgentRun:
         return {
             "user_input": self.user_input,
             "iteration": iteration + 1,
+            "tag": self.tag,
+            "session_id": self.session_id,
+            "workspace_files": self.workspace_files,
             "context_ids": pack.included_ids if pack else [],
             "retrieval_candidates": pack.retrieval_candidates if pack else [],
             "tool_results": [
@@ -343,6 +363,8 @@ class _AgentRun:
             error="empty input",
             prompt_version=self.cfg.prompt_version,
             run_transition_count=self._transition_step,
+            tag=self.tag,
+            session_id=self.session_id,
         )
 
     # ------------------------------------------------------------------
@@ -359,6 +381,19 @@ class _AgentRun:
             ttl_seconds=self.cfg.working_memory_ttl_seconds,
             source_run_id=self.run_id,
             meta={"stage": "user_input"},
+        )
+
+    async def _stash_workspace_files(self) -> None:
+        if not (self.cfg.enable_memory and self.workspace_files):
+            return
+        await self._run_memory_io(
+            self.memory.add,
+            "Workspace files available for this run:\n" + "\n".join(f"- {path}" for path in self.workspace_files),
+            kind="working",
+            salience=USER_INPUT_SALIENCE,
+            ttl_seconds=self.cfg.working_memory_ttl_seconds,
+            source_run_id=self.run_id,
+            meta={"stage": "workspace_files", "files": self.workspace_files},
         )
 
     def _emit_understand(self) -> None:
@@ -383,6 +418,33 @@ class _AgentRun:
                 k=self.cfg.memory_search_k,
                 min_salience=self.cfg.memory_min_salience,
             )
+        if self.session_id:
+            prior_session_runs = self.traces.list_session_runs(
+                self.session_id,
+                limit=6,
+                exclude_run_id=self.run_id,
+            )
+            session_hits = [
+                {
+                    "id": f"session:{run['run_id']}",
+                    "kind": "episodic",
+                    "salience": 0.95,
+                    "utility_score": 0.95,
+                    "text": (
+                        "Prior session turn\n"
+                        f"Tag: {run.get('tag') or 'none'}\n"
+                        f"User: {run.get('user_input')}\n"
+                        f"Answer: {run.get('final_output') or ''}"
+                    )[:1600],
+                    "meta": {
+                        "session_id": self.session_id,
+                        "source_run_id": run["run_id"],
+                        "source": "trace_session_history",
+                    },
+                }
+                for run in prior_session_runs
+            ]
+            self.memory_hits = [*session_hits, *self.memory_hits]
         initial_pack = self._pack()
         self.traces.log(
             TraceEvent(
@@ -409,6 +471,7 @@ class _AgentRun:
                     "prompt_version": self.cfg.prompt_version,
                     "context_ids": initial_pack.included_ids,
                     "retrieval_candidates": initial_pack.retrieval_candidates,
+                    "session_id": self.session_id,
                 },
             )
         )
@@ -449,6 +512,7 @@ class _AgentRun:
                 self.tool_results,
                 force_critique,
                 context_budget=self.cfg.context_char_budget,
+                prompt_template=self.cfg.planner_prompt_template,
             )
         self.total_latency += t.ms
         self.prior_decisions.append(decision)
@@ -503,20 +567,42 @@ class _AgentRun:
         if not (decision.action == "call_tool" and self.cfg.enable_tools and decision.tool):
             return False
 
+        tool_spec = self.tools.get(decision.tool)
+        tool_timeout = tool_spec.timeout if tool_spec else None
+        retry_budget = tool_spec.retry_budget if tool_spec else 0
+
+        result: dict[str, Any] = {}
+        attempt_count = 0
         with Timer() as t:
-            try:
-                result = await self.tools.call(
-                    decision.tool,
-                    decision.tool_args or {},
-                    context={"memory": self.memory, "config": self.cfg}
-                )
-            except Exception as e:
-                # Standardized Error Schema: Matches successful output structure for Planner reliability.
-                result = {
-                    "status": "error",
-                    "output": f"RUNTIME_ERROR: {str(e)}",
-                    "observation_summary": "The tool execution failed due to a backend exception."
-                }
+            for attempt in range(retry_budget + 1):
+                attempt_count = attempt + 1
+                try:
+                    call = self.tools.call(
+                        decision.tool,
+                        decision.tool_args or {},
+                        context={"memory": self.memory, "config": self.cfg},
+                    )
+                    if tool_timeout:
+                        result = await asyncio.wait_for(call, timeout=tool_timeout)
+                    else:
+                        result = await call
+                except asyncio.TimeoutError:
+                    result = {
+                        "status": "error",
+                        "output": None,
+                        "error": f"Tool timed out after {tool_timeout:.1f}s",
+                        "observation_summary": "The tool exceeded its timeout.",
+                    }
+                except Exception as e:
+                    # Standardized Error Schema: Matches successful output structure for Planner reliability.
+                    result = {
+                        "status": "error",
+                        "output": f"RUNTIME_ERROR: {str(e)}",
+                        "error": str(e),
+                        "observation_summary": "The tool execution failed due to a backend exception.",
+                    }
+                if result.get("status") == "ok" or attempt >= retry_budget:
+                    break
         self.total_latency += t.ms
         actual_summary = decision.observation_summary
         if result["status"] != "ok":
@@ -533,6 +619,7 @@ class _AgentRun:
             "observation_summary": actual_summary,
             "iteration": iteration + 1,
             "latency_ms": t.ms,
+            "attempts": attempt_count,
         }
         self.tool_results.append(tool_result)
 
@@ -567,6 +654,8 @@ class _AgentRun:
                     "prompt_version": self.cfg.prompt_version,
                     "context_ids": pack.included_ids,
                     "tool_latency_ms": t.ms,
+                    "attempts": attempt_count,
+                    "timeout_seconds": tool_timeout,
                 },
             )
         )
@@ -584,6 +673,7 @@ class _AgentRun:
                 attributes={
                     "prompt_version": self.cfg.prompt_version,
                     "tool_latency_ms": t.ms,
+                    "attempts": attempt_count,
                 },
             )
         )
@@ -946,6 +1036,8 @@ class _AgentRun:
             prompt_version=self.cfg.prompt_version,
             verification=self.verification,
             initial_score=self.initial_score_value or 0.0,
+            tag=self.tag,
+            session_id=self.session_id,
         )
 
     def _finalize_error(self, exc: Exception) -> AgentResult:
@@ -993,6 +1085,8 @@ class _AgentRun:
             run_transition_count=self._transition_step,
             verification=self.verification,
             initial_score=self.initial_score_value or 0.0,
+            tag=self.tag,
+            session_id=self.session_id,
         )
 
 

@@ -7,13 +7,21 @@ import type {
   EvalResults,
   FeedbackRequest,
   HealthResponse,
+  MemoryEntry,
+  MemoryEntryInput,
   MemoryHit,
   MemorySearchRequest,
   MemoryStats,
+  RunComparison,
   RunDetail,
+  RunFilters,
   RunResult,
   RunSummary,
+  Schedule,
+  ScheduleInput,
   Tool,
+  ToolLatencyStat,
+  UploadedFile,
 } from "@/lib/types";
 
 const ENV_BASE = process.env.NEXT_PUBLIC_AGENTOS_API_BASE;
@@ -35,10 +43,11 @@ async function parseError(response: Response): Promise<Error> {
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const isFormData = typeof FormData !== "undefined" && init?.body instanceof FormData;
   const response = await fetch(`${BASE}${path}`, {
     ...init,
     headers: {
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(!isFormData && init?.body ? { "Content-Type": "application/json" } : {}),
       ...(init?.headers ?? {}),
     },
     cache: "no-store",
@@ -83,17 +92,20 @@ function deltaType(delta: number, invert = false): EvalImprovement["type"] {
 }
 
 export const api = {
-  createRun(input: string): Promise<RunResult> {
+  createRun(input: string, options?: { tag?: string; session_id?: string; workspace_files?: string[] }): Promise<RunResult> {
     return apiFetch<RunResult>("/runs", {
       method: "POST",
-      body: JSON.stringify({ input }),
+      body: JSON.stringify({ input, ...options }),
     });
   },
 
-  createRunAsync(input: string): Promise<AsyncRunResponse> {
+  createRunAsync(
+    input: string,
+    options?: { tag?: string; session_id?: string; workspace_files?: string[] },
+  ): Promise<AsyncRunResponse> {
     return apiFetch<AsyncRunResponse>("/runs/async", {
       method: "POST",
-      body: JSON.stringify({ input }),
+      body: JSON.stringify({ input, ...options }),
     });
   },
 
@@ -101,12 +113,78 @@ export const api = {
     return apiFetch<RunDetail>(`/runs/${run_id}`);
   },
 
-  listRuns(limit = 50): Promise<RunSummary[]> {
-    return apiFetch<RunSummary[]>(`/runs?limit=${limit}`);
+  listRuns(filters: RunFilters | number = 50): Promise<RunSummary[]> {
+    const options = typeof filters === "number" ? { limit: filters } : filters;
+    const params = new URLSearchParams();
+    params.set("limit", String(options.limit ?? 50));
+    if (options.search) params.set("search", options.search);
+    if (typeof options.minScore === "number") params.set("min_score", String(options.minScore));
+    if (typeof options.maxScore === "number") params.set("max_score", String(options.maxScore));
+    if (options.dateFrom) params.set("date_from", options.dateFrom);
+    if (options.dateTo) params.set("date_to", options.dateTo);
+    if (typeof options.starred === "boolean") params.set("starred", String(options.starred));
+    if (options.tag) params.set("tag", options.tag);
+    if (options.sessionId) params.set("session_id", options.sessionId);
+    return apiFetch<RunSummary[]>(`/runs?${params.toString()}`);
+  },
+
+  compareRuns(leftRunId: string, rightRunId: string): Promise<RunComparison> {
+    const params = new URLSearchParams({
+      left_run_id: leftRunId,
+      right_run_id: rightRunId,
+    });
+    return apiFetch<RunComparison>(`/runs/compare?${params.toString()}`);
+  },
+
+  async exportRunReport(runId: string): Promise<string> {
+    return apiText(`/runs/${runId}/report`);
+  },
+
+  patchRun(runId: string, patch: { starred?: boolean; tag?: string | null; session_id?: string | null }): Promise<RunDetail> {
+    return apiFetch<RunDetail>(`/runs/${runId}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
   },
 
   getMemoryStats(): Promise<MemoryStats> {
     return apiFetch<MemoryStats>("/memory/stats");
+  },
+
+  listMemory(params?: {
+    limit?: number;
+    offset?: number;
+    query?: string;
+    kind?: string;
+    min_salience?: number;
+    max_salience?: number;
+  }): Promise<MemoryEntry[]> {
+    const search = new URLSearchParams();
+    if (typeof params?.limit === "number") search.set("limit", String(params.limit));
+    if (typeof params?.offset === "number") search.set("offset", String(params.offset));
+    if (params?.query) search.set("query", params.query);
+    if (params?.kind) search.set("kind", params.kind);
+    if (typeof params?.min_salience === "number") search.set("min_salience", String(params.min_salience));
+    if (typeof params?.max_salience === "number") search.set("max_salience", String(params.max_salience));
+    return apiFetch<MemoryEntry[]>(`/memory${search.toString() ? `?${search.toString()}` : ""}`);
+  },
+
+  createMemory(entry: MemoryEntryInput): Promise<MemoryEntry> {
+    return apiFetch<MemoryEntry>("/memory", {
+      method: "POST",
+      body: JSON.stringify(entry),
+    });
+  },
+
+  patchMemory(entryId: number, patch: Partial<MemoryEntryInput>): Promise<MemoryEntry> {
+    return apiFetch<MemoryEntry>(`/memory/${entryId}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+  },
+
+  async deleteMemory(entryId: number): Promise<void> {
+    await apiFetch<{ status: string }>(`/memory/${entryId}`, { method: "DELETE" });
   },
 
   searchMemory(req: MemorySearchRequest): Promise<{ results: MemoryHit[] }> {
@@ -154,6 +232,50 @@ export const api = {
       method: "POST",
       body: JSON.stringify(feedback),
     });
+  },
+
+  getToolLatencyStats(limitRuns = 100): Promise<ToolLatencyStat[]> {
+    return apiFetch<ToolLatencyStat[]>(`/runs/tool-stats?limit_runs=${limitRuns}`);
+  },
+
+  listSchedules(): Promise<Schedule[]> {
+    return apiFetch<Schedule[]>("/schedules");
+  },
+
+  createSchedule(schedule: ScheduleInput): Promise<Schedule> {
+    return apiFetch<Schedule>("/schedules", {
+      method: "POST",
+      body: JSON.stringify(schedule),
+    });
+  },
+
+  patchSchedule(scheduleId: string, patch: Partial<ScheduleInput> & { enabled?: boolean }): Promise<Schedule> {
+    return apiFetch<Schedule>(`/schedules/${scheduleId}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+  },
+
+  async deleteSchedule(scheduleId: string): Promise<void> {
+    await apiFetch<{ status: string }>(`/schedules/${scheduleId}`, {
+      method: "DELETE",
+    });
+  },
+
+  uploadFile(file: File, sessionId?: string): Promise<UploadedFile> {
+    const body = new FormData();
+    body.append("file", file);
+    if (sessionId) {
+      body.append("session_id", sessionId);
+    }
+    return apiFetch<UploadedFile>("/files/upload", {
+      method: "POST",
+      body,
+    });
+  },
+
+  listFiles(): Promise<UploadedFile[]> {
+    return apiFetch<UploadedFile[]>("/files");
   },
 
   exportRLHF(format = "jsonl"): Promise<string> {

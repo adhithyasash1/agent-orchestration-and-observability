@@ -67,6 +67,26 @@ export function SettingsDialog({ isOpen, onClose }: { isOpen: boolean; onClose: 
               checked={config?.force_local_only ?? false}
               onChange={(value) => patchConfig.mutate({ force_local_only: value })}
             />
+            <DialogToggle
+              label="Allow Internet MCP"
+              checked={config?.allow_internet_mcp ?? false}
+              onChange={(value) => patchConfig.mutate({ allow_internet_mcp: value })}
+            />
+            <DialogToggle
+              label="Excel MCP"
+              checked={config?.mcp.local_mcp.excel ?? false}
+              onChange={(value) => patchConfig.mutate({ enable_excel_mcp: value })}
+            />
+            <DialogToggle
+              label="Markdownify MCP"
+              checked={config?.mcp.local_mcp.markdownify ?? false}
+              onChange={(value) => patchConfig.mutate({ enable_markdownify_mcp: value })}
+            />
+            <DialogToggle
+              label="Trading Tools"
+              checked={config?.flags.trading_tools ?? false}
+              onChange={(value) => patchConfig.mutate({ enable_trading_tools: value })}
+            />
           </div>
         </motion.div>
       </div>

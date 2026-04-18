@@ -21,7 +21,7 @@ export function ChatInterface() {
   });
 
   const createRun = useMutation({
-    mutationFn: api.createRun,
+    mutationFn: (value: string) => api.createRun(value),
     onSuccess: () => {
       setInput("");
       queryClient.invalidateQueries({ queryKey: ["runs"] });

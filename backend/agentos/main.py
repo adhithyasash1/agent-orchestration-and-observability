@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api import api_router, build_components
+from .api.scheduler import RunScheduler
 from .config import settings
 
 import os
@@ -27,12 +28,17 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.components = build_components(settings)
+    app.state.scheduler = RunScheduler(app.state.components)
+    app.state.scheduler.start()
     logging.getLogger("agentos").info(
         "agentos-core ready — profile=%s backend=%s",
         settings.profile, settings.llm_backend,
     )
     yield
     c = app.state.components
+    scheduler = getattr(app.state, "scheduler", None)
+    if scheduler is not None:
+        scheduler.shutdown()
     c.memory.close()
     c.traces.close()
     logging.getLogger("agentos").info("agentos-core shut down cleanly.")

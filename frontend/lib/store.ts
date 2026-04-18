@@ -5,6 +5,9 @@ import type { ConfigResponse } from "./types";
 interface UIState {
   activeRunId: string | null;
   setActiveRunId: (id: string | null) => void;
+
+  conversationSessionId: string | null;
+  setConversationSessionId: (id: string | null) => void;
   
   isCommandPaletteOpen: boolean;
   setCommandPaletteOpen: (open: boolean) => void;
@@ -25,6 +28,9 @@ export const useStore = create<UIState>()(
     (set) => ({
       activeRunId: null,
       setActiveRunId: (activeRunId) => set({ activeRunId }),
+
+      conversationSessionId: null,
+      setConversationSessionId: (conversationSessionId) => set({ conversationSessionId }),
       
       isCommandPaletteOpen: false,
       setCommandPaletteOpen: (isCommandPaletteOpen) => set({ isCommandPaletteOpen }),
@@ -46,6 +52,7 @@ export const useStore = create<UIState>()(
       name: "agentos-storage",
       partialize: (state) => ({ 
         activeRunId: state.activeRunId,
+        conversationSessionId: state.conversationSessionId,
         settingsCache: state.settingsCache
       }),
     }

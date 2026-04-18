@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     # Storage
     db_path: str = "./data/agentos.db"
     prompt_version: str = "react-context-v1"
+    planner_prompt_template: str | None = None
 
     # Feature flags (ablations)
     enable_memory: bool = True
@@ -47,12 +48,20 @@ class Settings(BaseSettings):
     enable_llm_judge: bool = False  # use LLM-as-judge for live verification
     enable_otel: bool = False
     force_local_only: bool = False  # Air-Gap Mode: block external tools
+    allow_internet_mcp: bool = False
     debug_verbose: bool = True     # Controls the backend trace stream
 
     # Optional integrations
     enable_http_fetch: bool = True
     enable_tavily: bool = False
     enable_mcp_plugins: bool = True
+    enable_sequential_thinking_mcp: bool = False
+    enable_excel_mcp: bool = False
+    enable_markdownify_mcp: bool = False
+    enable_playwright_mcp: bool = False
+    enable_trading_tools: bool = False
+    vision_model: str = "llava"
+    vision_timeout_seconds: float = 120.0
     tavily_api_key: str = ""
     otel_service_name: str = "agentos-core"
     otel_exporter_otlp_endpoint: str = ""
@@ -94,6 +103,7 @@ class Settings(BaseSettings):
     # API
     api_prefix: str = "/api/v1"
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:8000"]
+    scheduler_timezone: str = "UTC"
 
     def apply_profile(self) -> None:
         """Apply profile-derived defaults.
@@ -127,6 +137,7 @@ class Settings(BaseSettings):
             self.enable_http_fetch = False
             self.enable_tavily = False
             self.enable_llm_judge = False
+            self.allow_internet_mcp = False
             self.force_local_only = True
         elif self.profile == "full":
             if self.llm_backend == "mock":
@@ -145,6 +156,7 @@ class Settings(BaseSettings):
             "llm_backend": self.llm_backend,
             "prompt_version": self.prompt_version,
             "force_local_only": self.force_local_only,
+            "allow_internet_mcp": self.allow_internet_mcp,
             "debug_verbose": self.debug_verbose,
             "context_char_budget": self.context_char_budget,
             "max_steps": self.max_steps,
@@ -160,11 +172,22 @@ class Settings(BaseSettings):
                 "http_fetch": self.enable_http_fetch,
                 "tavily": self.enable_tavily,
                 "mcp_plugins": self.enable_mcp_plugins,
+                "trading_tools": self.enable_trading_tools,
                 "otel": self.enable_otel,
                 "embeddings": self.enable_embeddings,
                 "reranker": self.enable_reranker,
                 "embedding_cache": self.embedding_cache_enabled,
                 "retrieval_cache": self.retrieval_cache_enabled,
+            },
+            "mcp": {
+                "local_mcp": {
+                    "sequential_thinking": self.enable_sequential_thinking_mcp,
+                    "excel": self.enable_excel_mcp,
+                    "markdownify": self.enable_markdownify_mcp,
+                },
+                "internet_mcp": {
+                    "playwright": self.enable_playwright_mcp,
+                },
             },
         }
 

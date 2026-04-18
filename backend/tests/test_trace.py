@@ -34,6 +34,36 @@ def test_list_runs(traces):
     assert len(runs) == 3
 
 
+def test_list_runs_supports_metadata_filters(traces):
+    left = traces.start_run(
+        "research prompt",
+        "minimal",
+        {},
+        prompt_version="bench-v1",
+        tag="research",
+        session_id="session-a",
+    )
+    right = traces.start_run(
+        "coding prompt",
+        "minimal",
+        {},
+        prompt_version="bench-v1",
+        tag="coding",
+    )
+    traces.finish_run(left, "a", 0.9, 10, 0)
+    traces.finish_run(right, "b", 0.2, 15, 0)
+    traces.update_run(left, starred=True)
+
+    starred = traces.list_runs(limit=10, starred=True)
+    assert [run["run_id"] for run in starred] == [left]
+
+    tagged = traces.list_runs(limit=10, tag="coding")
+    assert [run["run_id"] for run in tagged] == [right]
+
+    session_runs = traces.list_runs(limit=10, session_id="session-a")
+    assert [run["run_id"] for run in session_runs] == [left]
+
+
 def test_rl_transitions_are_returned_with_run(traces):
     run_id = traces.start_run("hello", "minimal", {}, prompt_version="rl-v1")
     traces.log_transition(

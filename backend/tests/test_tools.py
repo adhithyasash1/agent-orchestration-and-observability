@@ -55,6 +55,18 @@ async def test_default_registry_respects_flags(tools, settings):
     reg = build_default_registry(settings)
     assert "http_fetch" in reg.names()
 
+    settings.enable_trading_tools = False
+    reg = build_default_registry(settings)
+    assert "tradingview_screen" not in reg.names()
+
+    settings.enable_trading_tools = True
+    reg = build_default_registry(settings)
+    assert "tradingview_screen" in reg.names()
+
+    settings.force_local_only = True
+    reg = build_default_registry(settings)
+    assert "tradingview_screen" not in reg.names()
+
 
 async def test_workspace_read_file_rejects_oversized_files(tmp_path, monkeypatch):
     monkeypatch.setattr(workspace, "WORKSPACE_DIR", tmp_path)

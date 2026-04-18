@@ -1,15 +1,19 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, Heart, Settings2 } from "lucide-react";
+import { Activity, Clock3, Heart, Settings2 } from "lucide-react";
 
 import { ErrorBoundary, PageError } from "@/components/error-boundary";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import type { ConfigPatch } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useStore } from "@/lib/store";
 
-const TOGGLES: Array<{
+const RUNTIME_TOGGLES: Array<{
   key: keyof ConfigPatch;
   label: string;
   description: string;
@@ -21,12 +25,72 @@ const TOGGLES: Array<{
   { key: "enable_llm_judge", label: "LLM Judge", description: "Use the judge path when available." },
   { key: "enable_otel", label: "OTel", description: "Emit OpenTelemetry spans for runs." },
   { key: "force_local_only", label: "Force Local Only", description: "Block internet-facing tools and keep runs local." },
+  { key: "allow_internet_mcp", label: "Allow Internet MCP", description: "Permit internet-facing MCP servers when their individual toggles are on." },
   { key: "debug_verbose", label: "Debug Verbose", description: "Keep verbose trace logging enabled." },
 ];
+
+const LOCAL_MCP_TOGGLES: Array<{
+  key: keyof ConfigPatch;
+  label: string;
+  description: string;
+}> = [
+  {
+    key: "enable_sequential_thinking_mcp",
+    label: "Sequential Thinking",
+    description: "Enable the local step-by-step MCP reasoning server.",
+  },
+  {
+    key: "enable_excel_mcp",
+    label: "Excel MCP",
+    description: "Run excel-mcp-server on loopback and keep workbook paths inside data/workspace.",
+  },
+  {
+    key: "enable_markdownify_mcp",
+    label: "Markdownify MCP",
+    description: "Expose only local file conversions for workspace uploads, with web tools disabled.",
+  },
+];
+
+const INTERNET_MCP_TOGGLES: Array<{
+  key: keyof ConfigPatch;
+  label: string;
+  description: string;
+}> = [
+  {
+    key: "enable_playwright_mcp",
+    label: "Playwright MCP",
+    description: "Enable browser automation through the Playwright MCP server when internet MCP access is allowed.",
+  },
+];
+
+const INTERNET_TOOL_TOGGLES: Array<{
+  key: keyof ConfigPatch;
+  label: string;
+  description: string;
+}> = [
+  {
+    key: "enable_trading_tools",
+    label: "Trading Tools",
+    description: "Enable the native TradingView screener tool. Treat it as public market data, not a guaranteed feed.",
+  },
+];
+
+const PROMPT_PREVIEW_SAMPLE = {
+  tool_list: "- read_file(path: string) - Read a workspace file\n- describe_image(path: string) - Describe an uploaded image",
+  context: "Retrieved context packet with session history, memory hits, and uploaded files.",
+  tool_results: "- read_file [ok]: The CSV has 12 columns and 480 rows.",
+  critique: "The previous answer skipped the uploaded file.",
+  user_input: "Summarize the uploaded spreadsheet and answer the user's question.",
+};
 
 export default function SettingsPage() {
   const queryClient = useQueryClient();
   const { showToast } = useStore();
+  const [promptVersion, setPromptVersion] = useState("");
+  const [plannerPromptTemplate, setPlannerPromptTemplate] = useState("");
+  const [scheduleName, setScheduleName] = useState("");
+  const [scheduleCron, setScheduleCron] = useState("0 9 * * 1-5");
+  const [scheduleInput, setScheduleInput] = useState("");
 
   const { data: config, isLoading } = useQuery({
     queryKey: ["config"],
@@ -38,6 +102,18 @@ export default function SettingsPage() {
     queryFn: () => api.getHealth(),
     refetchInterval: 15000,
   });
+
+  const schedulesQuery = useQuery({
+    queryKey: ["schedules"],
+    queryFn: () => api.listSchedules(),
+  });
+
+  useEffect(() => {
+    if (config) {
+      setPromptVersion(config.prompt_version);
+      setPlannerPromptTemplate(config.planner_prompt_template);
+    }
+  }, [config]);
 
   const updateConfig = useMutation({
     mutationFn: (patch: ConfigPatch) => api.patchConfig(patch),
@@ -54,7 +130,36 @@ export default function SettingsPage() {
     },
   });
 
-  const flagValue = (key: keyof ConfigPatch): boolean => {
+  const scheduleMutation = useMutation({
+    mutationFn: () =>
+      api.createSchedule({
+        name: scheduleName,
+        cron: scheduleCron,
+        input: scheduleInput,
+        timezone: config?.scheduler_timezone,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["schedules"] });
+      setScheduleName("");
+      setScheduleInput("");
+      showToast("Scheduled run created", "success");
+    },
+    onError: (error: Error) => showToast(error.message, "error"),
+  });
+
+  const patchScheduleMutation = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) => api.patchSchedule(id, { enabled }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["schedules"] }),
+    onError: (error: Error) => showToast(error.message, "error"),
+  });
+
+  const deleteScheduleMutation = useMutation({
+    mutationFn: (id: string) => api.deleteSchedule(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["schedules"] }),
+    onError: (error: Error) => showToast(error.message, "error"),
+  });
+
+  const toggleValue = (key: keyof ConfigPatch): boolean => {
     if (!config) {
       return false;
     }
@@ -73,12 +178,34 @@ export default function SettingsPage() {
         return config.flags.otel;
       case "force_local_only":
         return config.force_local_only;
+      case "allow_internet_mcp":
+        return config.allow_internet_mcp;
+      case "enable_sequential_thinking_mcp":
+        return config.mcp.local_mcp.sequential_thinking;
+      case "enable_excel_mcp":
+        return config.mcp.local_mcp.excel;
+      case "enable_markdownify_mcp":
+        return config.mcp.local_mcp.markdownify;
+      case "enable_playwright_mcp":
+        return config.mcp.internet_mcp.playwright;
+      case "enable_trading_tools":
+        return config.flags.trading_tools;
       case "debug_verbose":
         return config.debug_verbose;
       default:
         return false;
     }
   };
+
+  const plannerPreview = useMemo(() => {
+    const template = plannerPromptTemplate || config?.planner_prompt_template || "";
+    return template
+      .replace("{tool_list}", PROMPT_PREVIEW_SAMPLE.tool_list)
+      .replace("{context}", PROMPT_PREVIEW_SAMPLE.context)
+      .replace("{tool_results}", PROMPT_PREVIEW_SAMPLE.tool_results)
+      .replace("{critique}", PROMPT_PREVIEW_SAMPLE.critique)
+      .replace("{user_input}", PROMPT_PREVIEW_SAMPLE.user_input);
+  }, [config?.planner_prompt_template, plannerPromptTemplate]);
 
   const patch = (change: ConfigPatch) => updateConfig.mutate(change);
 
@@ -87,7 +214,7 @@ export default function SettingsPage() {
       <div className="space-y-10 animate-fade-in pb-20">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Configuration</h1>
-          <p className="mt-1 text-muted">Live patch the runtime flags exposed by the backend config endpoint.</p>
+          <p className="mt-1 text-muted">Live patch runtime flags, edit the planner prompt, and manage scheduled runs.</p>
         </div>
 
         {isLoading || !config ? (
@@ -101,12 +228,66 @@ export default function SettingsPage() {
                   Runtime Flags
                 </h2>
                 <div className="divide-y divide-border rounded-2xl border border-border bg-glass">
-                  {TOGGLES.map((toggle) => (
+                  {RUNTIME_TOGGLES.map((toggle) => (
                     <ToggleRow
                       key={toggle.key}
                       label={toggle.label}
                       description={toggle.description}
-                      enabled={flagValue(toggle.key)}
+                      enabled={toggleValue(toggle.key)}
+                      onChange={(value) => patch({ [toggle.key]: value } as ConfigPatch)}
+                    />
+                  ))}
+                </div>
+              </section>
+
+              <section className="space-y-4">
+                <h2 className="flex items-center gap-2 px-2 text-sm font-bold uppercase tracking-widest text-muted">
+                  <Settings2 className="h-4 w-4 text-accent" />
+                  Local MCP Servers
+                </h2>
+                <div className="divide-y divide-border rounded-2xl border border-border bg-glass">
+                  {LOCAL_MCP_TOGGLES.map((toggle) => (
+                    <ToggleRow
+                      key={toggle.key}
+                      label={toggle.label}
+                      description={toggle.description}
+                      enabled={toggleValue(toggle.key)}
+                      onChange={(value) => patch({ [toggle.key]: value } as ConfigPatch)}
+                    />
+                  ))}
+                </div>
+              </section>
+
+              <section className="space-y-4">
+                <h2 className="flex items-center gap-2 px-2 text-sm font-bold uppercase tracking-widest text-muted">
+                  <Settings2 className="h-4 w-4 text-accent" />
+                  Internet MCP Servers
+                </h2>
+                <div className="divide-y divide-border rounded-2xl border border-border bg-glass">
+                  {INTERNET_MCP_TOGGLES.map((toggle) => (
+                    <ToggleRow
+                      key={toggle.key}
+                      label={toggle.label}
+                      description={toggle.description}
+                      enabled={toggleValue(toggle.key)}
+                      onChange={(value) => patch({ [toggle.key]: value } as ConfigPatch)}
+                    />
+                  ))}
+                </div>
+              </section>
+
+              <section className="space-y-4">
+                <h2 className="flex items-center gap-2 px-2 text-sm font-bold uppercase tracking-widest text-muted">
+                  <Settings2 className="h-4 w-4 text-accent" />
+                  Internet Tools
+                </h2>
+                <div className="divide-y divide-border rounded-2xl border border-border bg-glass">
+                  {INTERNET_TOOL_TOGGLES.map((toggle) => (
+                    <ToggleRow
+                      key={toggle.key}
+                      label={toggle.label}
+                      description={toggle.description}
+                      enabled={toggleValue(toggle.key)}
                       onChange={(value) => patch({ [toggle.key]: value } as ConfigPatch)}
                     />
                   ))}
@@ -137,6 +318,90 @@ export default function SettingsPage() {
                   />
                 </div>
               </section>
+
+              <section className="space-y-4">
+                <h2 className="flex items-center gap-2 px-2 text-sm font-bold uppercase tracking-widest text-muted">
+                  <Activity className="h-4 w-4 text-accent" />
+                  Prompt Template Editor
+                </h2>
+                <div className="rounded-2xl border border-border bg-glass p-6 space-y-4">
+                  <Input
+                    value={promptVersion}
+                    onChange={(event) => setPromptVersion(event.target.value)}
+                    placeholder="Prompt version"
+                  />
+                  <Textarea
+                    value={plannerPromptTemplate}
+                    onChange={(event) => setPlannerPromptTemplate(event.target.value)}
+                    className="min-h-72 font-mono text-xs"
+                  />
+                  <Button
+                    onClick={() =>
+                      patch({
+                        prompt_version: promptVersion,
+                        planner_prompt_template: plannerPromptTemplate,
+                      })
+                    }
+                  >
+                    Save Prompt Settings
+                  </Button>
+                  <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                    <div className="text-xs uppercase tracking-[0.2em] text-muted">Live Preview</div>
+                    <pre className="mt-3 overflow-x-auto whitespace-pre-wrap text-xs text-muted">
+                      {plannerPreview}
+                    </pre>
+                  </div>
+                </div>
+              </section>
+
+              <section className="space-y-4">
+                <h2 className="flex items-center gap-2 px-2 text-sm font-bold uppercase tracking-widest text-muted">
+                  <Clock3 className="h-4 w-4 text-accent" />
+                  Scheduled Runs
+                </h2>
+                <div className="rounded-2xl border border-border bg-glass p-6 space-y-4">
+                  <Input value={scheduleName} onChange={(event) => setScheduleName(event.target.value)} placeholder="Schedule name" />
+                  <Input value={scheduleCron} onChange={(event) => setScheduleCron(event.target.value)} placeholder="Cron expression" />
+                  <Textarea
+                    value={scheduleInput}
+                    onChange={(event) => setScheduleInput(event.target.value)}
+                    placeholder="Prompt to run on the schedule"
+                    className="min-h-28"
+                  />
+                  <Button onClick={() => scheduleMutation.mutate()} disabled={scheduleMutation.isPending}>
+                    {scheduleMutation.isPending ? "Saving..." : "Create Schedule"}
+                  </Button>
+                  <div className="space-y-3">
+                    {(schedulesQuery.data ?? []).map((schedule) => (
+                      <div key={schedule.schedule_id} className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                        <div className="flex items-start justify-between gap-4">
+                          <div>
+                            <div className="text-sm font-bold text-white">{schedule.name}</div>
+                            <div className="mt-1 text-xs text-muted">
+                              {schedule.cron} • next {schedule.next_run_at ?? "n/a"} • ran {schedule.run_count} times
+                            </div>
+                            <p className="mt-3 text-sm text-muted">{schedule.user_input}</p>
+                            {schedule.last_error ? (
+                              <div className="mt-2 text-xs text-danger">{schedule.last_error}</div>
+                            ) : null}
+                          </div>
+                          <div className="flex gap-2">
+                            <Button
+                              variant="ghost"
+                              onClick={() => patchScheduleMutation.mutate({ id: schedule.schedule_id, enabled: !schedule.enabled })}
+                            >
+                              {schedule.enabled ? "Pause" : "Resume"}
+                            </Button>
+                            <Button variant="ghost" onClick={() => deleteScheduleMutation.mutate(schedule.schedule_id)}>
+                              Delete
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </section>
             </div>
 
             <div className="space-y-8 lg:col-span-4">
@@ -156,6 +421,7 @@ export default function SettingsPage() {
                     label="OpenTelemetry"
                     status={health?.dependencies.otel === "enabled" ? "ok" : "disabled"}
                   />
+                  <HealthStatus label="Scheduler" status={health?.dependencies.scheduler} />
                 </div>
               </section>
 
@@ -164,6 +430,8 @@ export default function SettingsPage() {
                 <div className="mt-2">{config.profile}</div>
                 <div className="mt-4 font-bold text-foreground">Prompt version</div>
                 <div className="mt-2">{config.prompt_version}</div>
+                <div className="mt-4 font-bold text-foreground">Vision model</div>
+                <div className="mt-2">{config.vision_model}</div>
               </section>
             </div>
           </div>

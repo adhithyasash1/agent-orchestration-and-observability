@@ -74,6 +74,11 @@ Rules:
 """
 
 
+def resolve_planner_prompt(prompt_override: str | None = None) -> str:
+    prompt = (prompt_override or "").strip()
+    return prompt or PLANNER_PROMPT
+
+
 async def plan_next_step(
     llm: LLM,
     tools: ToolRegistry,
@@ -82,9 +87,10 @@ async def plan_next_step(
     tool_results: list[dict],
     critique: str = "",
     context_budget: int = 4000,
+    prompt_template: str | None = None,
 ) -> PlanDecision:
     tool_list = tools.describe() or "(no tools enabled)"
-    prompt = PLANNER_PROMPT.format(
+    prompt = resolve_planner_prompt(prompt_template).format(
         tool_list=tool_list,
         context=context[:max(400, context_budget)] or "(none)",
         tool_results=_summarize_tool_results(tool_results),

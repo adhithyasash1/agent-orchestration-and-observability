@@ -33,6 +33,9 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return list(self._tools.keys())
 
+    def get(self, name: str) -> Tool | None:
+        return self._tools.get(name)
+
     def describe(self) -> str:
         if not self._tools:
             return ""
@@ -128,7 +131,7 @@ def build_default_registry(settings) -> ToolRegistry:
         except Exception as e:
             print(f"Warning: Failed to load module {module_name}: {e}")
             
-    # 2. Register tools that match current profile and constraints
+    # 2. Register builtin tools that match current profile and constraints
     for t in _REGISTERED_TOOLS:
         if settings.profile in t.profiles or "full" in t.profiles:
             # Note: Air-Gap Mode Check
@@ -140,10 +143,22 @@ def build_default_registry(settings) -> ToolRegistry:
                 continue
             if t.name == "tavily_search" and not (settings.enable_tavily and settings.tavily_api_key):
                 continue
+            if t.name == "tradingview_screen" and not getattr(settings, "enable_trading_tools", False):
+                continue
             
             if t.name.endswith("_mcp") and not getattr(settings, "enable_mcp_plugins", False):
                 continue
 
             reg.register(t)
+
+    # 3. Discover MCP tools dynamically from enabled servers
+    if getattr(settings, "enable_mcp_plugins", False):
+        try:
+            from .modules.mcp_loader import load_mcp_tools
+
+            for t in load_mcp_tools(settings):
+                reg.register(t)
+        except Exception as e:
+            print(f"Warning: Failed to discover MCP tools: {e}")
 
     return reg

@@ -7,17 +7,22 @@ import {
   Cpu,
   ExternalLink,
   History,
+  Paperclip,
   Send,
+  X,
+  File,
+  Loader2,
   Zap,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
-import { motion } from "motion/react";
+import Link from "next/link";
+import { motion, AnimatePresence } from "motion/react";
 
 import { ErrorBoundary, PageError } from "@/components/error-boundary";
 import { AGENT_STAGES, getStageLabel, type AgentStage } from "@/lib/constants";
 import { api, BASE } from "@/lib/api";
-import type { RunDetail, Tool, TraceEvent } from "@/lib/types";
+import type { RunDetail, Tool, TraceEvent, UploadedFile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type UserMessage = {
@@ -46,6 +51,9 @@ export default function ChatPage() {
   const [liveEvents, setLiveEvents] = useState<TraceEvent[]>([]);
   const [streamError, setStreamError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [attachedFiles, setAttachedFiles] = useState<UploadedFile[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: tools = [] } = useQuery({
     queryKey: ["tools"],
@@ -53,11 +61,13 @@ export default function ChatPage() {
   });
 
   const dispatchMutation = useMutation({
-    mutationFn: (text: string) => api.createRunAsync(text),
+    mutationFn: ({ text, files }: { text: string; files: string[] }) =>
+      api.createRunAsync(text, { workspace_files: files }),
     onSuccess: (res) => {
       setCurrentRunId(res.run_id);
       setLiveEvents([]);
       setStreamError(null);
+      setAttachedFiles([]); // Clear after sending
     },
   });
 
@@ -103,19 +113,43 @@ export default function ChatPage() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, liveEvents]);
 
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    setIsUploading(true);
+    try {
+      const results = await Promise.all(
+        Array.from(files).map((file) => api.uploadFile(file))
+      );
+      setAttachedFiles((prev) => [...prev, ...results]);
+    } catch (error) {
+      console.error("Upload failed", error);
+      alert("Failed to upload one or more files.");
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const removeFile = (path: string) => {
+    setAttachedFiles((prev) => prev.filter((f) => f.path !== path));
+  };
+
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
-    if (!input.trim() || currentRunId) {
+    if ((!input.trim() && attachedFiles.length === 0) || currentRunId || isUploading) {
       return;
     }
 
+    const fileList = attachedFiles.map((f) => f.path);
     const userMessage: UserMessage = {
       role: "user",
-      user_input: input,
+      user_input: input || (attachedFiles.length > 0 ? `Uploaded ${attachedFiles.length} file(s)` : ""),
       id: Date.now(),
     };
     setMessages((prev) => [...prev, userMessage]);
-    dispatchMutation.mutate(input);
+    dispatchMutation.mutate({ text: input, files: fileList });
     setInput("");
   };
 
@@ -142,10 +176,55 @@ export default function ChatPage() {
 
         <div className="relative mt-8">
           <div className="pointer-events-none absolute inset-x-0 -top-12 h-12 bg-gradient-to-t from-background to-transparent" />
+          
+          <div className="flex flex-wrap gap-2 mb-2 px-2">
+            <AnimatePresence>
+              {attachedFiles.map((file) => (
+                <motion.div
+                  key={file.path}
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.8 }}
+                  className="group relative flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5"
+                >
+                  <File className="h-3 w-3 text-accent" />
+                  <span className="text-[10px] font-medium truncate max-w-[120px]">
+                    {file.filename || file.path.split("-").slice(1).join("-")}
+                  </span>
+                  <button
+                    onClick={() => removeFile(file.path)}
+                    className="ml-1 rounded-full p-0.5 hover:bg-white/10"
+                  >
+                    <X className="h-3 w-3 text-muted group-hover:text-foreground" />
+                  </button>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </div>
+
           <form
             onSubmit={handleSubmit}
             className="flex items-end gap-2 rounded-2xl border border-white/10 bg-glass p-2 shadow-2xl transition-all focus-within:ring-1 focus-within:ring-accent/50"
           >
+            <input
+              type="file"
+              multiple
+              ref={fileInputRef}
+              onChange={handleFileUpload}
+              className="hidden"
+            />
+            <button
+              type="button"
+              disabled={Boolean(currentRunId) || isUploading}
+              onClick={() => fileInputRef.current?.click()}
+              className="rounded-xl p-3 text-muted transition-all hover:bg-white/5 disabled:opacity-20"
+            >
+              {isUploading ? (
+                <Loader2 className="h-5 w-5 animate-spin" />
+              ) : (
+                <Paperclip className="h-5 w-5" />
+              )}
+            </button>
             <textarea
               rows={1}
               value={input}
@@ -156,20 +235,22 @@ export default function ChatPage() {
                   handleSubmit(event);
                 }
               }}
-              placeholder="Ask anything... (Cmd/Ctrl+Enter to launch)"
+              placeholder="Ask anything or attach files... (Cmd/Ctrl+Enter to launch)"
               className="scrollbar-hide min-h-[44px] flex-1 resize-none border-none bg-transparent p-3 text-sm outline-none"
               disabled={Boolean(currentRunId)}
             />
             <button
               type="submit"
-              disabled={!input.trim() || Boolean(currentRunId)}
+              disabled={(!input.trim() && attachedFiles.length === 0) || Boolean(currentRunId) || isUploading}
               className="rounded-xl bg-accent p-3 text-accent-foreground transition-all active:scale-95 disabled:opacity-20"
             >
               <Send className="h-5 w-5" />
             </button>
           </form>
           <div className="mt-2 flex justify-between px-2">
-            <span className="text-[10px] font-bold uppercase tracking-widest text-muted">Local Intel: Ready</span>
+            <span className="text-[10px] font-bold uppercase tracking-widest text-muted">
+              {isUploading ? "Uploading docs..." : "Local Intel: Ready"}
+            </span>
             <span className="text-[10px] font-bold uppercase tracking-widest text-muted">{input.length} chars</span>
           </div>
         </div>
@@ -236,12 +317,12 @@ function AgentMessage({ run }: { run: RunDetail }) {
           <div className="flex items-center gap-1.5 rounded border border-border bg-white/5 px-2 py-0.5">
             <History className="h-3 w-3" /> {run.transitions.length} stages
           </div>
-          <a
+          <Link
             href={`/runs/${run.run_id}`}
             className="ml-auto flex items-center gap-1.5 rounded border border-accent/30 bg-accent/10 px-2 py-0.5 text-accent transition-all hover:bg-accent/20"
           >
             Trace Inspector <ExternalLink className="h-3 w-3" />
-          </a>
+          </Link>
         </div>
 
         {run.status === "timeout_synthesis" && (

@@ -44,6 +44,42 @@ def test_list_runs_after_create(client):
     assert len(r.json()) >= 1
 
 
+def test_list_runs_supports_filters_and_patch_metadata(client):
+    run = client.post(
+        "/api/v1/runs",
+        json={"input": "What is the capital of France?", "tag": "research", "session_id": "session-123"},
+    ).json()
+
+    patched = client.patch(
+        f"/api/v1/runs/{run['run_id']}",
+        json={"starred": True, "tag": "coding"},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["starred"] is True
+    assert patched.json()["tag"] == "coding"
+
+    filtered = client.get("/api/v1/runs", params={"starred": True, "tag": "coding"})
+    assert filtered.status_code == 200
+    assert filtered.json()[0]["run_id"] == run["run_id"]
+
+
+def test_compare_and_report_routes(client):
+    first = client.post("/api/v1/runs", json={"input": "What is the capital of France?"}).json()
+    second = client.post("/api/v1/runs", json={"input": "Calculate 2 + 2 * 3"}).json()
+
+    compare = client.get(
+        "/api/v1/runs/compare",
+        params={"left_run_id": first["run_id"], "right_run_id": second["run_id"]},
+    )
+    assert compare.status_code == 200
+    assert compare.json()["left"]["run_id"] == first["run_id"]
+    assert compare.json()["right"]["run_id"] == second["run_id"]
+
+    report = client.get(f"/api/v1/runs/{first['run_id']}/report")
+    assert report.status_code == 200
+    assert report.text.startswith("# Run Report")
+
+
 def test_memory_search(client):
     client.post("/api/v1/runs", json={"input": "What is the capital of France?"})
     r = client.post("/api/v1/memory/search", json={"query": "Paris", "k": 3, "kinds": ["semantic"]})
@@ -79,17 +115,55 @@ def test_memory_stats_have_by_kind(client):
     assert "by_kind" in body
     assert "semantic" in body["by_kind"]
     assert "expiring_within_1h" in body
+    assert "salience_histogram" in body
+
+
+def test_memory_crud_endpoints(client):
+    created = client.post(
+        "/api/v1/memory",
+        json={"kind": "working", "text": "Manual note", "salience": 0.8, "meta": {"source": "manual"}},
+    )
+    assert created.status_code == 200
+    entry_id = created.json()["id"]
+
+    listing = client.get("/api/v1/memory", params={"query": "Manual"})
+    assert listing.status_code == 200
+    assert any(entry["id"] == entry_id for entry in listing.json())
+
+    updated = client.patch(
+        f"/api/v1/memory/{entry_id}",
+        json={"text": "Updated manual note", "salience": 0.6},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["text"] == "Updated manual note"
+
+    deleted = client.delete(f"/api/v1/memory/{entry_id}")
+    assert deleted.status_code == 200
 
 
 def test_config_patch(client):
-    r = client.post("/api/v1/config", json={"enable_tools": False})
+    r = client.post(
+        "/api/v1/config",
+        json={
+            "enable_tools": False,
+            "enable_excel_mcp": True,
+            "enable_trading_tools": True,
+            "allow_internet_mcp": True,
+        },
+    )
     assert r.status_code == 200
     body = r.json()
     assert body["current"]["flags"]["tools"] is False
+    assert body["current"]["flags"]["trading_tools"] is True
+    assert body["current"]["allow_internet_mcp"] is True
+    assert body["current"]["mcp"]["local_mcp"]["excel"] is True
     assert body["updated"]["enable_tools"] == {"old": True, "new": False}
+    assert body["updated"]["enable_excel_mcp"] == {"old": False, "new": True}
+    assert "planner_prompt_template" in body["current"]
 
     r2 = client.get("/api/v1/config")
     assert r2.json()["flags"]["tools"] is False
+    assert "mcp" in r2.json()
 
 
 def test_config_patch_empty_is_noop(client):
@@ -126,6 +200,13 @@ def test_feedback_endpoint(client):
     assert r.status_code == 200
     fetched = client.get(f"/api/v1/runs/{run['run_id']}").json()
     assert fetched["user_feedback"]["rating"] == 5
+
+
+def test_tool_stats_endpoint(client):
+    client.post("/api/v1/runs", json={"input": "Calculate 2 + 2 * 3"})
+    stats = client.get("/api/v1/runs/tool-stats")
+    assert stats.status_code == 200
+    assert any(row["tool"] == "calculator" for row in stats.json())
 
 
 def test_reject_empty_input(client):
